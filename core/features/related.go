@@ -1,0 +1,50 @@
+package features
+
+import "github.com/GreenFuze/SuitCode/core/provider"
+
+// RelationKind describes how two files are related.
+type RelationKind string
+
+const (
+	RelationSamePackage  RelationKind = "same_package"
+	RelationSameModule   RelationKind = "same_module"
+	RelationImports      RelationKind = "imports"
+	RelationImportedBy   RelationKind = "imported_by"
+	RelationTest         RelationKind = "test"         // this file tests the target
+	RelationTestedBy     RelationKind = "tested_by"    // the target tests this file
+	RelationSimilarName  RelationKind = "similar_name" // heuristic naming proximity
+	RelationHeuristic    RelationKind = "heuristic"
+)
+
+// RelatedFile is a file with an annotated relationship to the query target.
+type RelatedFile struct {
+	File       provider.FileReference
+	Relation   RelationKind
+	Reason     string
+	Provenance provider.Provenance
+	// Confidence is a 0–1 score. Higher means more certain.
+	Confidence float64
+}
+
+// RelatedRequest parameters for the related feature.
+type RelatedRequest struct {
+	BaseFeatureRequest
+	// FilePath is the file whose related files we want.
+	FilePath string
+}
+
+// RelatedResponse is the structured result of a related run.
+type RelatedResponse struct {
+	BaseFeatureResponse
+
+	TargetPath   string
+	RelatedFiles []RelatedFile
+
+	FilesConsidered int
+	FilesIncluded   int
+	FilesExcluded   int
+
+	// EstimatedContextAvoided is how many tokens a caller would NOT need to
+	// load, given that this response tells them which files matter.
+	EstimatedContextAvoided provider.TokenEstimate
+}
