@@ -14,6 +14,7 @@ import (
 	cfeatures "github.com/GreenFuze/SuitCode/core/features"
 	"github.com/GreenFuze/SuitCode/core/provider"
 	"github.com/GreenFuze/SuitCode/core/provider/filesystem"
+	goprovider "github.com/GreenFuze/SuitCode/core/provider/language/go"
 	"github.com/GreenFuze/SuitCode/core/provider/vcs"
 	"github.com/GreenFuze/SuitCode/investigator/artifacts"
 	invfeatures "github.com/GreenFuze/SuitCode/investigator/features"
@@ -73,8 +74,9 @@ type ProjectInvestigator struct {
 	estimator *provider.HeuristicEstimator
 
 	// Providers
-	fsProvider  *filesystem.Provider
-	vcsProvider *vcs.Provider
+	fsProvider   *filesystem.Provider
+	vcsProvider  *vcs.Provider
+	langProvider *goprovider.GoLanguageProvider // nil if load failed or not a Go module
 
 	// Cached file listing (populated during Warm).
 	mu          sync.RWMutex
@@ -116,13 +118,21 @@ func NewProjectInvestigator(ctx context.Context, repoPath string) (*ProjectInves
 		store = nil
 	}
 
+	// Language provider: try to load the Go import graph. Non-fatal on failure —
+	// the investigator falls back to heuristic-only scoring.
+	langP := goprovider.New()
+	if attachErr := langP.Attach(ctx, absPath); attachErr != nil || !langP.Ready() {
+		langP = nil
+	}
+
 	inv := &ProjectInvestigator{
-		repoPath:  absPath,
-		cfg:       cfg,
-		estimator: provider.NewHeuristicEstimator(),
-		fsProvider: fsP,
-		vcsProvider: vcsP,
-		store:     store,
+		repoPath:     absPath,
+		cfg:          cfg,
+		estimator:    provider.NewHeuristicEstimator(),
+		fsProvider:   fsP,
+		vcsProvider:  vcsP,
+		langProvider: langP,
+		store:        store,
 	}
 
 	return inv, nil
@@ -139,6 +149,11 @@ func (inv *ProjectInvestigator) Close() error {
 	}
 	if inv.vcsProvider != nil {
 		if err := inv.vcsProvider.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if inv.langProvider != nil {
+		if err := inv.langProvider.Close(); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -204,8 +219,26 @@ func (inv *ProjectInvestigator) Status() InvestigatorStatus {
 		})
 	}
 
+	// Language (Go import graph) provider.
+	if inv.langProvider != nil && inv.langProvider.Ready() {
+		caps := inv.langProvider.Capabilities()
+		status.Providers = append(status.Providers, ProviderStatus{
+			ProviderID:  caps.ID,
+			DisplayName: caps.DisplayName,
+			Ready:       true,
+			Summary:     "package graph loaded",
+		})
+	} else {
+		status.Providers = append(status.Providers, ProviderStatus{
+			ProviderID:  "go-language",
+			DisplayName: "Go Language Provider (go/packages)",
+			Ready:       false,
+			Summary:     "not ready (go/packages load failed or not a Go module)",
+		})
+	}
+
 	// Future providers — shown as not attached.
-	for _, name := range []string{"language", "test", "build"} {
+	for _, name := range []string{"test", "build"} {
 		status.Providers = append(status.Providers, ProviderStatus{
 			ProviderID:  provider.ProviderID(name),
 			DisplayName: fmt.Sprintf("%s provider", name),
@@ -275,7 +308,15 @@ func (inv *ProjectInvestigator) Context(ctx context.Context, req cfeatures.Conte
 	if err != nil {
 		return nil, fmt.Errorf("context: %w", err)
 	}
-	return invfeatures.RunContext(ctx, req, listing, inv.estimator)
+
+	// Nil-safe interface assignment: a *goprovider.GoLanguageProvider nil pointer
+	// must NOT be passed as a non-nil interface or method calls will panic.
+	var langProv provider.ImportGraphProvider
+	if inv.langProvider != nil {
+		langProv = inv.langProvider
+	}
+
+	return invfeatures.RunContext(ctx, req, listing, inv.estimator, langProv)
 }
 
 func (inv *ProjectInvestigator) FailureContext(ctx context.Context, req cfeatures.FailureContextRequest) (*cfeatures.FailureContextResponse, error) {
@@ -283,7 +324,14 @@ func (inv *ProjectInvestigator) FailureContext(ctx context.Context, req cfeature
 	if err != nil {
 		return nil, fmt.Errorf("failure-context: %w", err)
 	}
-	return invfeatures.RunFailureContext(ctx, req, listing, inv.estimator)
+
+	// Same nil-safe interface pattern as Context().
+	var langProv provider.ImportGraphProvider
+	if inv.langProvider != nil {
+		langProv = inv.langProvider
+	}
+
+	return invfeatures.RunFailureContext(ctx, req, listing, inv.estimator, langProv)
 }
 
 func (inv *ProjectInvestigator) VerifyPlan(ctx context.Context, req cfeatures.VerifyPlanRequest) (*cfeatures.VerifyPlanResponse, error) {

@@ -6,9 +6,9 @@ import (
 	"time"
 )
 
-// Warm drives the investigator through readiness levels 1 and 2, which are
-// sufficient for all v1 features. Higher levels (3, 4) require language
-// providers not yet implemented.
+// Warm drives the investigator through readiness levels 1–3. Level 3 requires
+// the Go language provider to be ready; if it is not, the investigator stays at
+// level 2 (heuristic-only scoring).
 //
 // Warm is idempotent and safe to call concurrently — subsequent calls return
 // immediately if the investigator is already at the target level.
@@ -16,8 +16,8 @@ func (inv *ProjectInvestigator) Warm(ctx context.Context) error {
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
 
-	if inv.readiness >= ReadinessLevel2 {
-		return nil // Already warm.
+	if inv.readiness >= ReadinessLevel3 {
+		return nil // Already fully warm.
 	}
 
 	start := time.Now()
@@ -44,6 +44,15 @@ func (inv *ProjectInvestigator) Warm(ctx context.Context) error {
 
 	inv.fileListing = listing
 	inv.readiness = ReadinessLevel2
+
+	// ── Level 3: import graph (Go language provider) ──────────────────────────
+	if inv.langProvider != nil {
+		if inv.langProvider.Ready() {
+			inv.readiness = ReadinessLevel3
+		} else {
+			fmt.Printf("SuitCode [warn]: go language provider not ready — staying at level 2\n")
+		}
+	}
 
 	// Record warm timing.
 	elapsed := time.Since(start)

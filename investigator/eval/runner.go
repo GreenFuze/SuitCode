@@ -3,6 +3,8 @@ package eval
 import (
 	"context"
 	"fmt"
+	"path/filepath"
+	"strings"
 	"time"
 
 	cfeatures "github.com/GreenFuze/SuitCode/core/features"
@@ -36,8 +38,10 @@ func (r *Runner) Run(ctx context.Context, suite SuiteID) (*EvalRun, error) {
 		scenarios = SmokeScenarios(r.repoPath)
 	case SuiteContextReduction:
 		scenarios = ContextReductionScenarios(r.repoPath)
+	case SuiteGoProvider:
+		scenarios = GoProviderScenarios(r.repoPath)
 	default:
-		return nil, fmt.Errorf("eval runner: unknown suite %q; available: smoke, context-reduction", suite)
+		return nil, fmt.Errorf("eval runner: unknown suite %q; available: smoke, context-reduction, go-provider", suite)
 	}
 
 	run := &EvalRun{
@@ -73,6 +77,8 @@ func (r *Runner) runScenario(ctx context.Context, sc EvalScenario) EvalResult {
 		result = r.checkBudgetCompliance(ctx, sc)
 	case KindContextCompression:
 		result = r.checkContextCompression(ctx, sc)
+	case KindGoldenFiles:
+		result = r.checkGoldenFiles(ctx, sc)
 	default:
 		result.Passed = false
 		result.Notes = append(result.Notes, fmt.Sprintf("scenario kind %q not implemented in v1", sc.Kind))
@@ -264,6 +270,105 @@ func (r *Runner) checkContextCompression(ctx context.Context, sc EvalScenario) E
 			Detail: fmt.Sprintf("%d / %d files included", resp.FilesIncluded, resp.FilesConsidered),
 		},
 	)
+
+	return result
+}
+
+// checkGoldenFiles runs Context() with SeedFiles and verifies that every
+// ExpectedFile appears in the capsule (and every ForbiddenFile does not).
+// It also records the import_edges_scanned metric for observability.
+func (r *Runner) checkGoldenFiles(ctx context.Context, sc EvalScenario) EvalResult {
+	result := EvalResult{
+		ScenarioID:   sc.ID,
+		ScenarioName: sc.Name,
+		Passed:       true,
+	}
+
+	budget := sc.Expectation.BudgetLimit
+	if budget == 0 {
+		budget = 8000
+	}
+
+	seeds := sc.Expectation.SeedFiles
+	if len(seeds) == 0 {
+		result.Notes = append(result.Notes, "no SeedFiles specified; skipping golden-files check")
+		return result
+	}
+
+	// Call Context() with the specified seed files.
+	resp, err := r.inv.Context(ctx, cfeatures.ContextRequest{
+		BaseFeatureRequest: cfeatures.BaseFeatureRequest{RepoPath: r.repoPath, Budget: budget},
+		Files:              seeds,
+	})
+	if err != nil {
+		result.Passed = false
+		result.Notes = append(result.Notes, fmt.Sprintf("Context() failed: %v", err))
+		return result
+	}
+
+	// Build lookup sets for the included files — by full rel-path and by basename
+	// for flexible matching.
+	includedByRel := make(map[string]bool, len(resp.IncludedRelPaths))
+	includedByBase := make(map[string]bool, len(resp.IncludedRelPaths))
+	for _, rel := range resp.IncludedRelPaths {
+		includedByRel[filepath.ToSlash(rel)] = true
+		includedByBase[strings.ToLower(filepath.Base(rel))] = true
+	}
+
+	// Check that every expected file is present.
+	for _, want := range sc.Expectation.ExpectedFiles {
+		wantSlash := filepath.ToSlash(want)
+		present := includedByRel[wantSlash] || includedByBase[strings.ToLower(filepath.Base(want))]
+		passed := present
+		if !passed {
+			result.Passed = false
+		}
+		result.Metrics = append(result.Metrics, EvalMetric{
+			Name:   fmt.Sprintf("golden_file_present:%s", wantSlash),
+			Value:  boolToFloat(present),
+			Passed: passed,
+			Detail: fmt.Sprintf("expected %q in capsule: %v", want, present),
+		})
+	}
+
+	// Check that every forbidden file is absent.
+	for _, forbidden := range sc.Expectation.ForbiddenFiles {
+		forbiddenSlash := filepath.ToSlash(forbidden)
+		absent := !includedByRel[forbiddenSlash] && !includedByBase[strings.ToLower(filepath.Base(forbidden))]
+		passed := absent
+		if !passed {
+			result.Passed = false
+		}
+		result.Metrics = append(result.Metrics, EvalMetric{
+			Name:   fmt.Sprintf("golden_file_absent:%s", forbiddenSlash),
+			Value:  boolToFloat(absent),
+			Passed: passed,
+			Detail: fmt.Sprintf("forbidden %q absent from capsule: %v", forbidden, absent),
+		})
+	}
+
+	// Record import-graph observability metrics.
+	edges := resp.Metrics.ContextReduction.ImportEdgesScanned
+	result.Metrics = append(result.Metrics, EvalMetric{
+		Name:   "import_edges_scanned",
+		Value:  float64(edges),
+		Passed: true,
+		Detail: fmt.Sprintf("%d import edges examined during scoring", edges),
+	})
+
+	lspEnhanced := resp.Metrics.ContextReduction.LspEnhanced
+	result.Metrics = append(result.Metrics, EvalMetric{
+		Name:   "lsp_enhanced",
+		Value:  boolToFloat(lspEnhanced),
+		Passed: true,
+		Detail: fmt.Sprintf("import-graph signals contributed to scoring: %v", lspEnhanced),
+	})
+
+	// On failure, dump the included paths for debugging.
+	if !result.Passed {
+		result.Notes = append(result.Notes,
+			fmt.Sprintf("capsule contained %d files: %v", len(resp.IncludedRelPaths), resp.IncludedRelPaths))
+	}
 
 	return result
 }

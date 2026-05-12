@@ -29,11 +29,14 @@ var (
 
 // RunFailureContext parses a failure log and returns structured signals and
 // a bounded context capsule for the suspected files.
+// langProv may be nil — when provided it enriches the inner RunContext call
+// with import-graph scoring signals.
 func RunFailureContext(
-	_ context.Context,
+	ctx context.Context,
 	req cfeatures.FailureContextRequest,
 	listing *provider.ProviderResult[provider.FilesystemListing],
 	estimator provider.TokenEstimator,
+	langProv provider.ImportGraphProvider,
 ) (*cfeatures.FailureContextResponse, error) {
 	if req.LogPath == "" && req.LogText == "" {
 		return nil, fmt.Errorf("failure-context: --log or inline log text is required")
@@ -180,7 +183,7 @@ func RunFailureContext(
 	// Compile a mini context capsule from the suspected files.
 	if len(seedFiles) > 0 {
 		ctxResp, err := RunContext(
-			context.Background(),
+			ctx,
 			cfeatures.ContextRequest{
 				BaseFeatureRequest: cfeatures.BaseFeatureRequest{
 					RepoPath: req.RepoPath,
@@ -191,6 +194,7 @@ func RunFailureContext(
 			},
 			listing,
 			estimator,
+			langProv,
 		)
 		if err == nil {
 			resp.RelatedContext = ctxResp.Capsule

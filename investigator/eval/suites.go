@@ -1,5 +1,48 @@
 package eval
 
+// GoProviderScenarios returns golden-files scenarios that verify the Go
+// language provider's import-graph signals produce the correct capsule
+// contents. They require the Go binary to be available at run time.
+func GoProviderScenarios(_ string) []EvalScenario {
+	return []EvalScenario{
+		{
+			ID:    "goprovider-golden-forward-import",
+			Suite: SuiteGoProvider,
+			Kind:  KindGoldenFiles,
+			Name:  "go-provider: forward import inclusion",
+			Description: "seed=investigator/features/context.go must pull in core/features/context.go " +
+				"and core/provider/roles.go (packages directly imported by that file's package). " +
+				"Budget is intentionally large — this scenario tests import scoring correctness, not compression.",
+			Feature: "context",
+			Expectation: EvalExpectation{
+				BudgetLimit: 200_000,
+				SeedFiles:   []string{"investigator/features/context.go"},
+				ExpectedFiles: []string{
+					"core/features/context.go",
+					"core/provider/roles.go",
+				},
+			},
+		},
+		{
+			ID:    "goprovider-golden-reverse-import",
+			Suite: SuiteGoProvider,
+			Kind:  KindGoldenFiles,
+			Name:  "go-provider: reverse import inclusion",
+			Description: "seed=core/provider/roles.go must pull in core/provider/filesystem/provider.go " +
+				"(the filesystem package directly imports core/provider). " +
+				"Budget is intentionally large — this scenario tests import scoring correctness, not compression.",
+			Feature: "context",
+			Expectation: EvalExpectation{
+				BudgetLimit: 200_000,
+				SeedFiles:   []string{"core/provider/roles.go"},
+				ExpectedFiles: []string{
+					"core/provider/filesystem/provider.go",
+				},
+			},
+		},
+	}
+}
+
 // SmokeScenarios returns the smoke suite — a minimal set of checks that
 // verify the investigator produces valid, deterministic, budget-compliant
 // output. All scenarios run against the repository at repoPath.

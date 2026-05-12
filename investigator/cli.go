@@ -570,7 +570,7 @@ func newEvalRunCmd(repoPath string) *cobra.Command {
   investigator . eval run --suite context-reduction`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if suite == "" {
-				return fmt.Errorf("--suite is required (available: smoke, context-reduction)")
+				return fmt.Errorf("--suite is required (available: smoke, context-reduction, go-provider)")
 			}
 
 			inv, err := buildInvestigator(cmd.Context(), repoPath)

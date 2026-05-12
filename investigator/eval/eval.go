@@ -11,6 +11,7 @@ type SuiteID string
 const (
 	SuiteSmoke            SuiteID = "smoke"
 	SuiteContextReduction SuiteID = "context-reduction"
+	SuiteGoProvider       SuiteID = "go-provider"
 )
 
 // ScenarioKind categorises what an eval scenario tests.
@@ -45,6 +46,10 @@ type EvalExpectation struct {
 	BudgetLimit int
 	// ContextCompression: minimum compression ratio (capsule/evidence ≤ threshold).
 	MaxCompressionRatio float64
+	// GoldenFiles/SeedFiles: seed files passed to Context() when running a
+	// KindGoldenFiles scenario. Distinct from ExpectedFiles (which names files
+	// the capsule must contain).
+	SeedFiles []string
 	// GoldenFiles: paths that must appear in the response.
 	ExpectedFiles []string
 	// GoldenFiles: paths that must NOT appear in the response.

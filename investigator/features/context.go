@@ -14,13 +14,23 @@ import (
 
 const defaultContextBudget = 8_000
 
+// Scoring constants for candidate selection. Later constants in the list are
+// only reached if no earlier rule matched (goto scored enforces exclusivity).
+const (
+	scoreImportedBy = 0.90 // file is in a package directly imported by a seed's package
+	scoreImporterOf = 0.80 // file is in a package that directly imports a seed's package
+)
+
 // RunContext is the ContextCompiler: it gathers candidates, scores and ranks
 // them, selects within budget, and returns a bounded ContextCapsule.
+// langProv may be nil — when provided it enriches scoring with import-graph
+// signals; otherwise the function falls back to heuristic-only scoring.
 func RunContext(
-	_ context.Context,
+	ctx context.Context,
 	req cfeatures.ContextRequest,
 	listing *provider.ProviderResult[provider.FilesystemListing],
 	estimator provider.TokenEstimator,
+	langProv provider.ImportGraphProvider,
 ) (*cfeatures.ContextResponse, error) {
 	if len(req.Files) == 0 && req.DiffRef == "" {
 		return nil, fmt.Errorf("context: --files or --from is required")
@@ -76,6 +86,46 @@ func RunContext(
 		seedDirs[filepath.ToSlash(filepath.Dir(s))] = true
 	}
 
+	// ── Import-graph enrichment (optional) ────────────────────────────────────
+	//
+	// When a language provider is available, pre-compute the set of absolute
+	// file paths that are in packages directly imported by any seed (forward)
+	// and in packages that directly import any seed (reverse). These sets feed
+	// the 0.90/0.80 scoring rules below.
+
+	importedAbsPaths := make(map[string]bool)
+	importerAbsPaths := make(map[string]bool)
+	importEdgesScanned := 0
+	lspEnhanced := false
+
+	if langProv != nil {
+		for _, seedRel := range seedRelPaths {
+			seedAbs := filepath.Join(req.RepoPath, filepath.FromSlash(seedRel))
+
+			// Forward: packages directly imported by the seed's package.
+			if res, err := langProv.FileImports(ctx, seedAbs); err == nil {
+				for _, p := range res.Data {
+					importedAbsPaths[p] = true
+					importEdgesScanned++
+				}
+				if len(res.Data) > 0 {
+					lspEnhanced = true
+				}
+			}
+
+			// Reverse: packages that directly import the seed's package.
+			if res, err := langProv.FileImporters(ctx, seedAbs); err == nil {
+				for _, p := range res.Data {
+					importerAbsPaths[p] = true
+					importEdgesScanned++
+				}
+				if len(res.Data) > 0 {
+					lspEnhanced = true
+				}
+			}
+		}
+	}
+
 	var candidates []candidate
 	seenCandidates := make(map[string]bool)
 
@@ -93,7 +143,15 @@ func RunContext(
 		} else {
 			dir := filepath.ToSlash(filepath.Dir(f.RelPath))
 
-			// Test files for seeds.
+			// File is in a package directly imported by a seed's package (0.90).
+			// Checked before test-file heuristic since 0.90 > 0.85.
+			if importedAbsPaths[f.Path] {
+				score = scoreImportedBy
+				reason = "file is in a package directly imported by a seed"
+				goto scored
+			}
+
+			// Test files for seeds (0.85).
 			for _, s := range seedRelPaths {
 				tfs := testFilesForSource(listing, s)
 				for _, tf := range tfs {
@@ -103,6 +161,15 @@ func RunContext(
 						goto scored
 					}
 				}
+			}
+
+			// File's package directly imports a seed's package (0.80).
+			// Checked AFTER test-file rule (0.85 > 0.80) so a test file that
+			// also imports the seed still gets the higher test-file score.
+			if importerAbsPaths[f.Path] {
+				score = scoreImporterOf
+				reason = "file is in a package that directly imports a seed's package"
+				goto scored
 			}
 
 			// Same directory as a seed.
@@ -224,6 +291,11 @@ func RunContext(
 	resp.FilesIncluded = len(capsule.Selections)
 	resp.FilesExcluded = len(capsule.Rejections)
 
+	// Populate IncludedRelPaths for eval golden-files checks.
+	for _, sel := range capsule.Selections {
+		resp.IncludedRelPaths = append(resp.IncludedRelPaths, sel.Candidate.File.RelPath)
+	}
+
 	resp.EvidenceScanned = provider.TokenEstimate{
 		Tokens:     totalCandidateTokens,
 		Method:     "heuristic_chars_div4",
@@ -243,6 +315,10 @@ func RunContext(
 	metrics.Budget.Used = tokenUsed
 	computeContextReduction(&metrics, totalCandidateTokens, tokenUsed,
 		resp.FilesConsidered, resp.FilesIncluded, resp.FilesExcluded)
+
+	// Propagate import-graph signals into metrics.
+	metrics.ContextReduction.LspEnhanced = lspEnhanced
+	metrics.ContextReduction.ImportEdgesScanned = importEdgesScanned
 
 	finishMetrics(&metrics, start, resp)
 	resp.Metrics = metrics

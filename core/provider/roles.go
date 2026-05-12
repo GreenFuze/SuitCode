@@ -96,6 +96,29 @@ type LanguageProvider interface {
 	GetSymbols(ctx context.Context, filePath string) (*ProviderResult[[]string], error)
 }
 
+// ImportGraphProvider extends LanguageProvider with file-level import graph
+// queries. Implemented by GoLanguageProvider in Phase 1 (static go/packages)
+// and enriched by gopls in Phase 2 (symbol-level navigation).
+//
+// Both methods operate one hop only — direct imports, not transitive closure.
+// Results contain only files that belong to the same module (no stdlib or
+// external dependency files are included).
+type ImportGraphProvider interface {
+	LanguageProvider
+
+	// FileImports returns the absolute paths of all non-test .go files in
+	// packages directly imported by the package containing filePath.
+	// filePath must be an absolute path to a .go source file.
+	// Returns an empty result (not an error) when filePath is not indexed.
+	FileImports(ctx context.Context, filePath string) (*ProviderResult[[]string], error)
+
+	// FileImporters returns the absolute paths of all non-test .go files in
+	// packages that directly import the package containing filePath.
+	// filePath must be an absolute path to a .go source file.
+	// Returns an empty result (not an error) when filePath is not indexed.
+	FileImporters(ctx context.Context, filePath string) (*ProviderResult[[]string], error)
+}
+
 // TestProvider discovers and maps test cases to source files.
 type TestProvider interface {
 	Provider

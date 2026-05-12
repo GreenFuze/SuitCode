@@ -78,4 +78,9 @@ type ContextResponse struct {
 	EstimatedContextAvoided provider.TokenEstimate
 	// CompressionRatio mirrors Capsule.CompressionRatio for easy access.
 	CompressionRatio float64
+
+	// IncludedRelPaths lists the repo-relative paths of all files selected
+	// into the capsule, in rank order. Populated by RunContext; used by
+	// KindGoldenFiles eval checks.
+	IncludedRelPaths []string
 }

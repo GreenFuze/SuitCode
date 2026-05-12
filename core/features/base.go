@@ -151,6 +151,13 @@ type ContextReductionMetrics struct {
 	FilesConsidered int
 	FilesIncluded   int
 	FilesExcluded   int
+
+	// LspEnhanced is true when at least one import-graph signal (from a
+	// LanguageProvider) contributed to candidate scoring in this run.
+	LspEnhanced bool
+	// ImportEdgesScanned is the total count of import edges (forward +
+	// reverse) examined across all seed files.
+	ImportEdgesScanned int
 }
 
 // ProviderMetrics records per-provider contribution to a feature run.
