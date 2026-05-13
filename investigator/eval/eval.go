@@ -18,11 +18,13 @@ const (
 type ScenarioKind string
 
 const (
-	KindDeterminism       ScenarioKind = "determinism"
-	KindBudgetCompliance  ScenarioKind = "budget_compliance"
+	KindDeterminism        ScenarioKind = "determinism"
+	KindBudgetCompliance   ScenarioKind = "budget_compliance"
 	KindContextCompression ScenarioKind = "context_compression"
-	KindGoldenFiles       ScenarioKind = "golden_files"
-	KindGoldenTests       ScenarioKind = "golden_tests"
+	KindGoldenFiles        ScenarioKind = "golden_files"
+	KindGoldenTests        ScenarioKind = "golden_tests"
+	// KindGoldenSymbols checks that GetSymbols returns expected symbol names.
+	KindGoldenSymbols ScenarioKind = "golden_symbols"
 )
 
 // EvalScenario is a static definition of one evaluation case.
@@ -56,6 +58,9 @@ type EvalExpectation struct {
 	ForbiddenFiles []string
 	// GoldenTests: test names that must appear in the response.
 	ExpectedTests []string
+	// GoldenSymbols: symbol names that must appear in GetSymbols() result
+	// for SeedFiles[0].
+	ExpectedSymbols []string
 }
 
 // EvalMetric is a single measurement produced during scenario execution.

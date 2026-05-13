@@ -219,19 +219,25 @@ func (inv *ProjectInvestigator) Status() InvestigatorStatus {
 		})
 	}
 
-	// Language (Go import graph) provider.
+	// Language (Go import graph + gopls) provider.
 	if inv.langProvider != nil && inv.langProvider.Ready() {
 		caps := inv.langProvider.Capabilities()
+		var summary string
+		if inv.langProvider.GoplsReady() {
+			summary = "package graph + gopls ready"
+		} else {
+			summary = "package graph loaded (gopls starting or unavailable)"
+		}
 		status.Providers = append(status.Providers, ProviderStatus{
 			ProviderID:  caps.ID,
 			DisplayName: caps.DisplayName,
 			Ready:       true,
-			Summary:     "package graph loaded",
+			Summary:     summary,
 		})
 	} else {
 		status.Providers = append(status.Providers, ProviderStatus{
 			ProviderID:  "go-language",
-			DisplayName: "Go Language Provider (go/packages)",
+			DisplayName: "Go Language Provider (go/packages + gopls)",
 			Ready:       false,
 			Summary:     "not ready (go/packages load failed or not a Go module)",
 		})
@@ -349,6 +355,22 @@ func (inv *ProjectInvestigator) VerifyPlan(ctx context.Context, req cfeatures.Ve
 	}
 
 	return invfeatures.RunVerifyPlan(ctx, req, listing, vcsResult, inv.estimator)
+}
+
+// GetFileSymbols returns the symbol names defined in the file at absPath.
+// Returns an empty slice (not an error) when gopls is not yet ready.
+func (inv *ProjectInvestigator) GetFileSymbols(ctx context.Context, absPath string) ([]string, error) {
+	if inv.langProvider == nil {
+		return nil, nil
+	}
+	result, err := inv.langProvider.GetSymbols(ctx, absPath)
+	if err != nil {
+		return nil, fmt.Errorf("get-file-symbols: %w", err)
+	}
+	if result == nil {
+		return nil, nil
+	}
+	return result.Data, nil
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GreenFuze/SuitCode/core/provider"
 	goprovider "github.com/GreenFuze/SuitCode/core/provider/language/go"
@@ -82,26 +83,75 @@ func TestGoLanguageProvider_GetImports(t *testing.T) {
 	}
 }
 
-// TestGoLanguageProvider_GetSymbols_Limitation verifies that GetSymbols
-// returns a "not_implemented" limitation (Phase 2 feature).
-func TestGoLanguageProvider_GetSymbols_Limitation(t *testing.T) {
-	p := attachedProvider(t)
-	root := repoRoot(t)
+// TestGoLanguageProvider_GetSymbols verifies symbol retrieval works when gopls
+// is available, or degrades gracefully when it is not yet ready.
+func TestGoLanguageProvider_GetSymbols(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping gopls integration test in short mode")
+	}
 
-	absPath := filepath.Join(root, "core", "features", "context.go")
-	result, err := p.GetSymbols(context.Background(), absPath)
+	p := attachedProvider(t)
+	defer func() {
+		if err := p.Close(); err != nil {
+			t.Logf("Close(): %v", err)
+		}
+	}()
+
+	root := repoRoot(t)
+	absPath := filepath.Join(root, "core", "provider", "language", "go", "provider.go")
+
+	// Poll for gopls readiness — startup typically takes 2–5 s.
+	const pollInterval = 200 * time.Millisecond
+	const maxWait = 60 * time.Second
+	deadline := time.Now().Add(maxWait)
+	for !p.GoplsReadyForTest() && time.Now().Before(deadline) {
+		time.Sleep(pollInterval)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	result, err := p.GetSymbols(ctx, absPath)
 	if err != nil {
 		t.Fatalf("GetSymbols: %v", err)
 	}
-
-	var hasNotImplemented bool
-	for _, lim := range result.Limitations {
-		if lim.Kind == "not_implemented" {
-			hasNotImplemented = true
-		}
+	if result == nil {
+		t.Fatal("GetSymbols returned nil result")
 	}
-	if !hasNotImplemented {
-		t.Errorf("expected 'not_implemented' limitation, got: %v", result.Limitations)
+
+	if p.GoplsReadyForTest() {
+		// gopls is available — verify real symbols are returned.
+		if len(result.Data) == 0 {
+			t.Errorf("expected symbols from provider.go, got none (limitations: %v)", result.Limitations)
+		}
+		if hasLimitationKind(result.Limitations, "gopls_not_ready") {
+			t.Errorf("unexpected 'gopls_not_ready' limitation when gopls is ready: %v", result.Limitations)
+		}
+
+		// gopls returns methods as "(*GoLanguageProvider).Attach" etc., so we
+		// use symbolPresent() which also matches on ".SymbolName" suffix.
+		expected := []string{"GoLanguageProvider", "New", "Attach", "Ready", "GoplsReady", "Close"}
+		for _, want := range expected {
+			if !symbolPresent(result.Data, want) {
+				t.Errorf("expected symbol %q in result %v", want, result.Data)
+			}
+		}
+
+		// Provenance must reference the LSP source kind.
+		if len(result.Provenance) == 0 {
+			t.Error("expected non-empty Provenance when gopls returns symbols")
+		}
+		for _, prov := range result.Provenance {
+			if prov.SourceKind != provider.SourceKindLSP {
+				t.Errorf("expected SourceKindLSP provenance, got %q", prov.SourceKind)
+			}
+		}
+	} else {
+		// gopls failed to start within the timeout — graceful degradation.
+		t.Logf("gopls not ready after %s; checking for graceful limitation", maxWait)
+		if len(result.Limitations) == 0 {
+			t.Error("expected at least one limitation when gopls is not ready")
+		}
 	}
 }
 

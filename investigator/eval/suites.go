@@ -1,5 +1,11 @@
 package eval
 
+const (
+	// SuiteGoProviderSymbols verifies that GetSymbols returns expected symbol
+	// names from known Go source files via the gopls integration.
+	SuiteGoProviderSymbols SuiteID = "go-provider-symbols"
+)
+
 // GoProviderScenarios returns golden-files scenarios that verify the Go
 // language provider's import-graph signals produce the correct capsule
 // contents. They require the Go binary to be available at run time.
@@ -37,6 +43,54 @@ func GoProviderScenarios(_ string) []EvalScenario {
 				SeedFiles:   []string{"core/provider/roles.go"},
 				ExpectedFiles: []string{
 					"core/provider/filesystem/provider.go",
+				},
+			},
+		},
+	}
+}
+
+// GoProviderSymbolScenarios returns scenarios that verify GetSymbols returns
+// real symbol names for known Go source files via the gopls integration.
+// These scenarios require gopls to be available and skip gracefully if it is not.
+func GoProviderSymbolScenarios(_ string) []EvalScenario {
+	return []EvalScenario{
+		{
+			ID:    "goprovider-symbols-provider-go",
+			Suite: SuiteGoProviderSymbols,
+			Kind:  KindGoldenSymbols,
+			Name:  "go-provider: symbols in provider.go",
+			Description: "GetSymbols for core/provider/language/go/provider.go must return " +
+				"the top-level type and function names defined in that file.",
+			Feature: "symbols",
+			Expectation: EvalExpectation{
+				SeedFiles: []string{"core/provider/language/go/provider.go"},
+				ExpectedSymbols: []string{
+					"GoLanguageProvider",
+					"New",
+					"Attach",
+					"Ready",
+					"GoplsReady",
+					"Close",
+					"GetImports",
+					"GetSymbols",
+					"FileImports",
+					"FileImporters",
+				},
+			},
+		},
+		{
+			ID:    "goprovider-symbols-lsp-types-go",
+			Suite: SuiteGoProviderSymbols,
+			Kind:  KindGoldenSymbols,
+			Name:  "go-provider: symbols in lsp_types.go",
+			Description: "GetSymbols for core/provider/language/go/lsp_types.go must return " +
+				"key LSP type names and the pathToURI function.",
+			Feature: "symbols",
+			Expectation: EvalExpectation{
+				SeedFiles: []string{"core/provider/language/go/lsp_types.go"},
+				ExpectedSymbols: []string{
+					"lspDocumentSymbol",
+					"pathToURI",
 				},
 			},
 		},

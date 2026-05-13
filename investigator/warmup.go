@@ -49,6 +49,11 @@ func (inv *ProjectInvestigator) Warm(ctx context.Context) error {
 	if inv.langProvider != nil {
 		if inv.langProvider.Ready() {
 			inv.readiness = ReadinessLevel3
+			if inv.langProvider.GoplsReady() {
+				fmt.Printf("SuitCode: go language provider ready (package graph + gopls)\n")
+			} else {
+				fmt.Printf("SuitCode: go language provider ready (package graph; gopls still starting)\n")
+			}
 		} else {
 			fmt.Printf("SuitCode [warn]: go language provider not ready — staying at level 2\n")
 		}

@@ -17,6 +17,9 @@ type Investigator interface {
 	RepoOverview(ctx context.Context, req cfeatures.RepoOverviewRequest) (*cfeatures.RepoOverviewResponse, error)
 	ExplainFile(ctx context.Context, req cfeatures.ExplainFileRequest) (*cfeatures.ExplainFileResponse, error)
 	Context(ctx context.Context, req cfeatures.ContextRequest) (*cfeatures.ContextResponse, error)
+	// GetFileSymbols returns the symbol names defined in the file at absPath.
+	// Returns nil (no error) when the language provider is unavailable or not ready.
+	GetFileSymbols(ctx context.Context, absPath string) ([]string, error)
 }
 
 // Runner executes eval scenarios against a live Investigator.
@@ -40,8 +43,10 @@ func (r *Runner) Run(ctx context.Context, suite SuiteID) (*EvalRun, error) {
 		scenarios = ContextReductionScenarios(r.repoPath)
 	case SuiteGoProvider:
 		scenarios = GoProviderScenarios(r.repoPath)
+	case SuiteGoProviderSymbols:
+		scenarios = GoProviderSymbolScenarios(r.repoPath)
 	default:
-		return nil, fmt.Errorf("eval runner: unknown suite %q; available: smoke, context-reduction, go-provider", suite)
+		return nil, fmt.Errorf("eval runner: unknown suite %q; available: smoke, context-reduction, go-provider, go-provider-symbols", suite)
 	}
 
 	run := &EvalRun{
@@ -79,6 +84,8 @@ func (r *Runner) runScenario(ctx context.Context, sc EvalScenario) EvalResult {
 		result = r.checkContextCompression(ctx, sc)
 	case KindGoldenFiles:
 		result = r.checkGoldenFiles(ctx, sc)
+	case KindGoldenSymbols:
+		result = r.checkGoldenSymbols(ctx, sc)
 	default:
 		result.Passed = false
 		result.Notes = append(result.Notes, fmt.Sprintf("scenario kind %q not implemented in v1", sc.Kind))
@@ -373,9 +380,96 @@ func (r *Runner) checkGoldenFiles(ctx context.Context, sc EvalScenario) EvalResu
 	return result
 }
 
+// checkGoldenSymbols calls GetFileSymbols for SeedFiles[0] and verifies that
+// every ExpectedSymbol appears in the result. Skips gracefully when the
+// language provider / gopls is not ready.
+func (r *Runner) checkGoldenSymbols(ctx context.Context, sc EvalScenario) EvalResult {
+	result := EvalResult{
+		ScenarioID:   sc.ID,
+		ScenarioName: sc.Name,
+		Passed:       true,
+	}
+
+	seeds := sc.Expectation.SeedFiles
+	if len(seeds) == 0 {
+		result.Notes = append(result.Notes, "no SeedFiles specified; skipping golden-symbols check")
+		return result
+	}
+
+	// Resolve the seed file to an absolute path.
+	absPath := filepath.Join(r.repoPath, seeds[0])
+
+	names, err := r.inv.GetFileSymbols(ctx, absPath)
+	if err != nil {
+		result.Passed = false
+		result.Notes = append(result.Notes, fmt.Sprintf("GetFileSymbols(%s) failed: %v", seeds[0], err))
+		return result
+	}
+
+	if len(names) == 0 {
+		// gopls not ready — record as a skip rather than a hard failure.
+		result.Notes = append(result.Notes,
+			fmt.Sprintf("GetFileSymbols(%s) returned no symbols (gopls may not be ready); skipping", seeds[0]))
+		result.Metrics = append(result.Metrics, EvalMetric{
+			Name:   "gopls_available",
+			Value:  0,
+			Passed: false,
+			Detail: "no symbols returned — gopls unavailable or not yet ready",
+		})
+		return result
+	}
+
+	// Record availability metric.
+	result.Metrics = append(result.Metrics, EvalMetric{
+		Name:   "gopls_available",
+		Value:  1,
+		Passed: true,
+		Detail: fmt.Sprintf("gopls returned %d symbols from %s", len(names), seeds[0]),
+	})
+
+	// Check each expected symbol.
+	// gopls returns Go methods as "(*Receiver).Method" so we match by
+	// exact name or ".Name" suffix.
+	for _, want := range sc.Expectation.ExpectedSymbols {
+		present := symbolNamePresent(names, want)
+		if !present {
+			result.Passed = false
+		}
+		result.Metrics = append(result.Metrics, EvalMetric{
+			Name:   fmt.Sprintf("golden_symbol_present:%s", want),
+			Value:  boolToFloat(present),
+			Passed: present,
+			Detail: fmt.Sprintf("symbol %q present in %s: %v", want, seeds[0], present),
+		})
+	}
+
+	if !result.Passed {
+		result.Notes = append(result.Notes,
+			fmt.Sprintf("returned symbols: %v", names))
+	}
+
+	return result
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ──────────────────────────────────────────────────────────────────────────────
+
+// symbolNamePresent reports whether any symbol in names matches want.
+// Accepts an exact match or a ".want" suffix to handle gopls's
+// "(*Receiver).Method" method naming convention.
+func symbolNamePresent(names []string, want string) bool {
+	suffix := "." + want
+	for _, n := range names {
+		if n == want {
+			return true
+		}
+		if len(n) > len(suffix) && n[len(n)-len(suffix):] == suffix {
+			return true
+		}
+	}
+	return false
+}
 
 func summarise(results []EvalResult) EvalSummary {
 	s := EvalSummary{Total: len(results)}

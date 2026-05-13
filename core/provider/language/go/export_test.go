@@ -61,3 +61,41 @@ func (w *PackageIndexForTest) ImportedFilesForTest(absPath string) []string {
 func (w *PackageIndexForTest) ImporterFilesForTest(absPath string) []string {
 	return w.idx.importerFiles(absPath)
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Phase 2 (gopls) test exports
+// ──────────────────────────────────────────────────────────────────────────────
+
+// GoplsReadyForTest reports whether gopls has been successfully initialized.
+func (p *GoLanguageProvider) GoplsReadyForTest() bool {
+	return p.goplsReady.Load()
+}
+
+// ResolveBinaryForTest exposes the internal gopls binary resolver.
+func ResolveBinaryForTest() (string, *provider.Limitation) {
+	return resolveBinary()
+}
+
+// NewGoplsClientForTest creates a goplsClient for use in tests.
+func NewGoplsClientForTest(binaryPath, rootPath string) *goplsClient {
+	return newGoplsClient(binaryPath, rootPath)
+}
+
+// PathToURIForTest exposes the internal pathToURI helper.
+func PathToURIForTest(absPath string) string {
+	return pathToURI(absPath)
+}
+
+// FlattenSymbolNamesForTest exposes the internal symbol-flattening helper.
+func FlattenSymbolNamesForTest(syms []lspDocumentSymbol) []string {
+	return flattenSymbolNames(syms)
+}
+
+// LspDocumentSymbolForTest is an alias for lspDocumentSymbol so tests can
+// construct symbol trees without using internal types directly.
+type LspDocumentSymbolForTest = lspDocumentSymbol
+
+// ManagedGoplsBinDirForTest exposes managedGoplsBinDir for unit tests.
+func ManagedGoplsBinDirForTest() string {
+	return managedGoplsBinDir()
+}
