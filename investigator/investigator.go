@@ -359,6 +359,15 @@ func (inv *ProjectInvestigator) VerifyPlan(ctx context.Context, req cfeatures.Ve
 
 // GetFileSymbols returns the symbol names defined in the file at absPath.
 // Returns an empty slice (not an error) when gopls is not yet ready.
+// GoplsReady reports whether the gopls subprocess has been started and is ready
+// to answer symbol queries. Returns false when no language provider is attached.
+func (inv *ProjectInvestigator) GoplsReady() bool {
+	if inv.langProvider == nil {
+		return false
+	}
+	return inv.langProvider.GoplsReady()
+}
+
 func (inv *ProjectInvestigator) GetFileSymbols(ctx context.Context, absPath string) ([]string, error) {
 	if inv.langProvider == nil {
 		return nil, nil

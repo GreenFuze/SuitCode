@@ -20,6 +20,9 @@ type Investigator interface {
 	// GetFileSymbols returns the symbol names defined in the file at absPath.
 	// Returns nil (no error) when the language provider is unavailable or not ready.
 	GetFileSymbols(ctx context.Context, absPath string) ([]string, error)
+	// GoplsReady reports whether the gopls subprocess has been started and is
+	// ready to answer symbol queries.
+	GoplsReady() bool
 }
 
 // Runner executes eval scenarios against a live Investigator.
@@ -399,8 +402,8 @@ func (r *Runner) checkGoldenFiles(ctx context.Context, sc EvalScenario) EvalResu
 }
 
 // checkGoldenSymbols calls GetFileSymbols for SeedFiles[0] and verifies that
-// every ExpectedSymbol appears in the result. Skips gracefully when the
-// language provider / gopls is not ready.
+// every ExpectedSymbol appears in the result. Waits up to 30 s for gopls to
+// become ready; fails the scenario if gopls never starts or returns no symbols.
 func (r *Runner) checkGoldenSymbols(ctx context.Context, sc EvalScenario) EvalResult {
 	result := EvalResult{
 		ScenarioID:   sc.ID,
@@ -410,7 +413,28 @@ func (r *Runner) checkGoldenSymbols(ctx context.Context, sc EvalScenario) EvalRe
 
 	seeds := sc.Expectation.SeedFiles
 	if len(seeds) == 0 {
-		result.Notes = append(result.Notes, "no SeedFiles specified; skipping golden-symbols check")
+		result.Passed = false
+		result.Notes = append(result.Notes, "no SeedFiles specified for golden-symbols check")
+		return result
+	}
+
+	// Wait up to 30 s for gopls to be ready — it starts asynchronously.
+	const goplsTimeout = 30 * time.Second
+	deadline := time.Now().Add(goplsTimeout)
+	for !r.inv.GoplsReady() && time.Now().Before(deadline) {
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	if !r.inv.GoplsReady() {
+		result.Passed = false
+		result.Notes = append(result.Notes,
+			fmt.Sprintf("gopls not ready after %s — cannot evaluate symbol expectations", goplsTimeout))
+		result.Metrics = append(result.Metrics, EvalMetric{
+			Name:   "gopls_available",
+			Value:  0,
+			Passed: false,
+			Detail: fmt.Sprintf("gopls did not become ready within %s", goplsTimeout),
+		})
 		return result
 	}
 
@@ -425,14 +449,15 @@ func (r *Runner) checkGoldenSymbols(ctx context.Context, sc EvalScenario) EvalRe
 	}
 
 	if len(names) == 0 {
-		// gopls not ready — record as a skip rather than a hard failure.
+		// gopls reported ready but returned no symbols — treat as a failure.
+		result.Passed = false
 		result.Notes = append(result.Notes,
-			fmt.Sprintf("GetFileSymbols(%s) returned no symbols (gopls may not be ready); skipping", seeds[0]))
+			fmt.Sprintf("GetFileSymbols(%s) returned no symbols despite gopls being ready", seeds[0]))
 		result.Metrics = append(result.Metrics, EvalMetric{
 			Name:   "gopls_available",
 			Value:  0,
 			Passed: false,
-			Detail: "no symbols returned — gopls unavailable or not yet ready",
+			Detail: "gopls ready but returned empty symbol list — unexpected",
 		})
 		return result
 	}
