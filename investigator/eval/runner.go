@@ -132,6 +132,24 @@ func (r *Runner) checkDeterminism(ctx context.Context, sc EvalScenario) EvalResu
 				return result
 			}
 			hash = resp.Metrics.DeterministicHash
+
+		case "context":
+			seeds := sc.Expectation.SeedFiles
+			if len(seeds) == 0 {
+				result.Notes = append(result.Notes, "no SeedFiles for context determinism; skipping")
+				return result
+			}
+			resp, err := r.inv.Context(ctx, cfeatures.ContextRequest{
+				BaseFeatureRequest: cfeatures.BaseFeatureRequest{RepoPath: r.repoPath, Budget: budget},
+				Files:              seeds,
+			})
+			if err != nil {
+				result.Passed = false
+				result.Notes = append(result.Notes, fmt.Sprintf("run %d failed: %v", i+1, err))
+				return result
+			}
+			hash = resp.Metrics.DeterministicHash
+
 		default:
 			result.Passed = false
 			result.Notes = append(result.Notes, fmt.Sprintf("determinism check not implemented for feature %q", sc.Feature))

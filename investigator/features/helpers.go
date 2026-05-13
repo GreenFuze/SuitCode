@@ -62,13 +62,41 @@ func finishMetrics(m *cfeatures.FeatureMetrics, start time.Time, response any) {
 		m.Budget.Compliance = float64(m.Budget.Used) / float64(m.Budget.Requested)
 	}
 
-	// Compute deterministic hash of the response for repeatability checks.
+	// Compute a deterministic hash of the response's *content* fields only.
+	// Volatile metadata (RunID, Timing, Metrics, Trace) is excluded so the
+	// hash is stable across identical runs regardless of wall-clock time.
 	if response != nil {
-		if data, err := json.Marshal(response); err == nil {
-			h := sha256.Sum256(data)
-			m.DeterministicHash = fmt.Sprintf("%x", h)
-		}
+		m.DeterministicHash = contentHash(response)
 	}
+}
+
+// contentHash returns the SHA-256 (hex) of the response after stripping the
+// run-specific fields that change on every invocation: RunID, Metrics, Trace.
+// This makes the hash a reliable signal for output determinism.
+func contentHash(response any) string {
+	data, err := json.Marshal(response)
+	if err != nil {
+		return ""
+	}
+
+	// Parse into a generic map so we can surgically remove volatile keys.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return ""
+	}
+
+	// Remove all fields whose values change between identical runs.
+	delete(raw, "RunID")   // time-based in BaseFeatureResponse
+	delete(raw, "Metrics") // contains RunID + Timing
+	delete(raw, "Trace")   // contains timestamps
+
+	clean, err := json.Marshal(raw)
+	if err != nil {
+		return ""
+	}
+
+	h := sha256.Sum256(clean)
+	return fmt.Sprintf("%x", h)
 }
 
 // computeContextReduction populates the ContextReductionMetrics fields.

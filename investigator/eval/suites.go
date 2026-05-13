@@ -11,6 +11,8 @@ const (
 // contents. They require the Go binary to be available at run time.
 func GoProviderScenarios(_ string) []EvalScenario {
 	return []EvalScenario{
+		// ── Forward and reverse import edges ──────────────────────────────────────
+
 		{
 			ID:    "goprovider-golden-forward-import",
 			Suite: SuiteGoProvider,
@@ -44,6 +46,65 @@ func GoProviderScenarios(_ string) []EvalScenario {
 				ExpectedFiles: []string{
 					"core/provider/filesystem/provider.go",
 				},
+			},
+		},
+
+		// ── Same-package / same-directory cohesion ────────────────────────────────
+
+		{
+			ID:    "goprovider-same-package-cohesion",
+			Suite: SuiteGoProvider,
+			Kind:  KindGoldenFiles,
+			Name:  "go-provider: same-package file cohesion",
+			Description: "seed=investigator/eval/runner.go must include all other files in the same " +
+				"package (suites.go, eval.go). Files sharing a package are co-scored by the import " +
+				"graph and should always be included when budget allows.",
+			Feature: "context",
+			Expectation: EvalExpectation{
+				BudgetLimit: 40_000,
+				SeedFiles:   []string{"investigator/eval/runner.go"},
+				ExpectedFiles: []string{
+					"investigator/eval/suites.go",
+					"investigator/eval/eval.go",
+				},
+			},
+		},
+		{
+			ID:    "goprovider-gopls-package-cohesion",
+			Suite: SuiteGoProvider,
+			Kind:  KindGoldenFiles,
+			Name:  "go-provider: gopls package file cohesion",
+			Description: "seed=core/provider/language/go/provider.go must include key sibling files " +
+				"(gopls_client.go, lsp_transport.go). The gopls provider is a multi-file package " +
+				"and its files should travel together in context.",
+			Feature: "context",
+			Expectation: EvalExpectation{
+				BudgetLimit: 200_000,
+				SeedFiles:   []string{"core/provider/language/go/provider.go"},
+				ExpectedFiles: []string{
+					"core/provider/language/go/gopls_client.go",
+					"core/provider/language/go/lsp_transport.go",
+					"core/provider/language/go/lsp_types.go",
+					"core/provider/language/go/gopls_binary.go",
+				},
+			},
+		},
+
+		// ── Forbidden-file anti-regression ────────────────────────────────────────
+
+		{
+			ID:    "goprovider-forbidden-unrelated-file",
+			Suite: SuiteGoProvider,
+			Kind:  KindGoldenFiles,
+			Name:  "go-provider: unrelated file excluded from capsule",
+			Description: "seed=core/provider/language/go/lsp_types.go has no import relationship " +
+				"with investigator/eval/eval.go — the eval package should never appear in its " +
+				"capsule regardless of budget. Failures here indicate false-positive scoring.",
+			Feature: "context",
+			Expectation: EvalExpectation{
+				BudgetLimit:    200_000,
+				SeedFiles:      []string{"core/provider/language/go/lsp_types.go"},
+				ForbiddenFiles: []string{"investigator/eval/eval.go"},
 			},
 		},
 	}
@@ -170,15 +231,17 @@ func ContextReductionScenarios(repoPath string) []EvalScenario {
 			},
 		},
 		{
-			ID:          "ctxred-determinism",
+			ID:          "ctxred-context-determinism",
 			Suite:       SuiteContextReduction,
 			Kind:        KindDeterminism,
 			Name:        "context determinism",
-			Description: "Running context five times must produce the same hash",
-			Feature:     "repo-overview",
+			Description: "Running context five times for the same seed must produce an identical hash " +
+				"each time. Non-determinism here means the capsule contents vary unpredictably.",
+			Feature: "context",
 			Expectation: EvalExpectation{
 				RepeatCount: 5,
 				BudgetLimit: 4000,
+				SeedFiles:   []string{"investigator/investigator.go"},
 			},
 		},
 	}
