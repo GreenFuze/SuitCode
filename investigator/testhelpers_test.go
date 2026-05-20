@@ -21,9 +21,6 @@ var (
 	sharedInvErr           error
 )
 
-// sharedInv returns a warmed *ProjectInvestigator for the repository root.
-// It is created once and reused across all tests in this package.
-// The test is marked fatal if setup fails.
 // findRepoRoot walks up from the current directory until it finds a go.mod file,
 // returning that directory. Falls back to "." if go.mod is not found.
 func findRepoRoot() string {
@@ -44,6 +41,8 @@ func findRepoRoot() string {
 	return "."
 }
 
+// sharedInv returns a warmed *ProjectInvestigator for the repository root.
+// It is created once and reused across all tests in this package.
 func sharedInv(t *testing.T) *ProjectInvestigator {
 	t.Helper()
 
@@ -103,13 +102,7 @@ func sliceContains(s []string, target string) bool {
 	return false
 }
 
-// TestMain sets up any global state needed for investigator tests and
-// suppresses the gopls startup banner to keep test output clean.
+// TestMain sets up any global state needed for investigator tests.
 func TestMain(m *testing.M) {
-	// Suppress all stdout from the investigator during tests — the status
-	// messages ("SuitCode: warming…") are useful interactively but noisy in
-	// `go test -v` output. Tests use t.Logf for their own reporting.
-	// NOTE: we cannot capture os.Stdout without forking, so we skip that and
-	// just run normally. The test binary's output is filtered by `go test`.
 	os.Exit(m.Run())
 }

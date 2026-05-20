@@ -63,7 +63,7 @@ func (s *Server) ListenAndServe() error {
 	if err != nil {
 		return fmt.Errorf("server: listen on %s: %w", s.http.Addr, err)
 	}
-	fmt.Printf("SuitCode investigator HTTP API listening on http://localhost:%d\n", s.port)
+	logf("HTTP API listening on http://localhost:%d", s.port)
 	return s.http.Serve(ln)
 }
 
@@ -76,13 +76,16 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // Handlers
 // ──────────────────────────────────────────────────────────────────────────────
 
+// handleHealth returns current readiness so the coordinator can poll warmup
+// progress. The readiness_level integer field enables threshold checks.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	st := s.inv.Status()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":      true,
-		"repo":    st.RepoPath,
-		"ready":   st.ReadinessDesc,
-		"version": "v1",
+		"ok":              true,
+		"repo":            st.RepoPath,
+		"ready":           st.ReadinessDesc,
+		"readiness_level": int(st.Readiness),
+		"version":         "v1",
 	})
 }
 
@@ -227,8 +230,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	enc.SetEscapeHTML(false)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(v); err != nil {
-		// Can't write headers again — just log the encoding failure.
-		fmt.Printf("server: json encode: %v\n", err)
+		logf("warn: json encode error: %v", err)
 	}
 }
 

@@ -19,7 +19,7 @@ import (
 //
 // Run all: go test ./investigator/ -run TestEvalSuite -v -timeout 120s
 // Run one: go test ./investigator/ -run TestEvalSuite_GoProvider -v -timeout 60s
-// Skip:    go test ./investigator/ -short ./investigator/
+// Skip:    go test ./investigator/ -short
 // ──────────────────────────────────────────────────────────────────────────────
 
 func TestEvalSuite_Smoke(t *testing.T) {
@@ -46,8 +46,6 @@ func TestEvalSuite_GoProviderSymbols(t *testing.T) {
 // Helpers
 // ──────────────────────────────────────────────────────────────────────────────
 
-// runEvalSuite executes all scenarios in the given suite and reports each one
-// as a named sub-test. The parent test fails if any scenario fails.
 func runEvalSuite(t *testing.T, suite eval.SuiteID) {
 	t.Helper()
 
@@ -70,11 +68,8 @@ func runEvalSuite(t *testing.T, suite eval.SuiteID) {
 	)
 
 	for _, result := range run.Results {
-		result := result // capture for sub-test closure
-
 		t.Run(scenarioSubtestName(result.ScenarioName), func(t *testing.T) {
 			if result.Passed {
-				// Log summary metrics for observability even on pass.
 				for _, m := range result.Metrics {
 					t.Logf("metric %-50s value=%-8.2f passed=%v  %s",
 						m.Name, m.Value, m.Passed, m.Detail)
@@ -82,7 +77,6 @@ func runEvalSuite(t *testing.T, suite eval.SuiteID) {
 				return
 			}
 
-			// Scenario failed — report each failed metric clearly.
 			for _, m := range result.Metrics {
 				if !m.Passed {
 					t.Errorf("FAIL metric %q: %s", m.Name, m.Detail)
@@ -98,8 +92,6 @@ func runEvalSuite(t *testing.T, suite eval.SuiteID) {
 	}
 }
 
-// scenarioSubtestName converts a scenario name to a valid Go sub-test name by
-// replacing slashes (which Go uses as sub-test separators) and collapsing spaces.
 func scenarioSubtestName(name string) string {
 	name = strings.ReplaceAll(name, "/", "|")
 	name = strings.ReplaceAll(name, " ", "_")

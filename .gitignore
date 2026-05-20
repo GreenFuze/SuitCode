@@ -13,3 +13,6 @@
 
 # Dependency directories (remove the comment below to include it)
 # vendor/
+
+# SuitCode per-project state directory (lives in analyzed repos)
+.suitcode/

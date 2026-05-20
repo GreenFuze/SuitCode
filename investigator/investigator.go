@@ -6,10 +6,12 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/GreenFuze/SuitCode/calllog"
 	"github.com/GreenFuze/SuitCode/core/config"
 	cfeatures "github.com/GreenFuze/SuitCode/core/features"
 	"github.com/GreenFuze/SuitCode/core/provider"
@@ -24,11 +26,11 @@ import (
 type ReadinessLevel int
 
 const (
-	ReadinessUnknown  ReadinessLevel = 0
-	ReadinessLevel1   ReadinessLevel = 1 // repo identity, git state, language detection
-	ReadinessLevel2   ReadinessLevel = 2 // full file index, ignore rules
-	ReadinessLevel3   ReadinessLevel = 3 // symbol/import graph, test mapping (requires language providers)
-	ReadinessLevel4   ReadinessLevel = 4 // expensive on-demand computations
+	ReadinessUnknown ReadinessLevel = 0
+	ReadinessLevel1  ReadinessLevel = 1 // repo identity, git state, language detection
+	ReadinessLevel2  ReadinessLevel = 2 // full file index, ignore rules
+	ReadinessLevel3  ReadinessLevel = 3 // symbol/import graph, test mapping (requires language providers)
+	ReadinessLevel4  ReadinessLevel = 4 // expensive on-demand computations
 )
 
 // String returns a human-readable readiness description.
@@ -57,11 +59,11 @@ type ProviderStatus struct {
 
 // InvestigatorStatus is returned by Status() for the status command.
 type InvestigatorStatus struct {
-	RepoPath      string
-	Readiness     ReadinessLevel
-	ReadinessDesc string
-	Providers     []ProviderStatus
-	LastWarmedAt  *time.Time
+	RepoPath       string
+	Readiness      ReadinessLevel
+	ReadinessDesc  string
+	Providers      []ProviderStatus
+	LastWarmedAt   *time.Time
 	WarmDurationMs int64
 }
 
@@ -79,15 +81,18 @@ type ProjectInvestigator struct {
 	langProvider *goprovider.GoLanguageProvider // nil if load failed or not a Go module
 
 	// Cached file listing (populated during Warm).
-	mu          sync.RWMutex
-	fileListing *provider.ProviderResult[provider.FilesystemListing]
-	vcsStatus   *provider.ProviderResult[provider.VCSStatus]
-	readiness   ReadinessLevel
-	lastWarmed  *time.Time
+	mu           sync.RWMutex
+	fileListing  *provider.ProviderResult[provider.FilesystemListing]
+	vcsStatus    *provider.ProviderResult[provider.VCSStatus]
+	readiness    ReadinessLevel
+	lastWarmed   *time.Time
 	warmDuration time.Duration
 
 	// Artifact store for persisting run metrics and eval results.
 	store *artifacts.Store
+	// callLogger appends per-call metrics to .suitcode/calls.jsonl.
+	// Nil when the log cannot be opened (non-fatal).
+	callLogger *calllog.Logger
 }
 
 // NewProjectInvestigator creates and attaches an investigator for the given
@@ -125,6 +130,9 @@ func NewProjectInvestigator(ctx context.Context, repoPath string) (*ProjectInves
 		langP = nil
 	}
 
+	// Call logger: non-fatal.
+	clog, _ := calllog.New(absPath)
+
 	inv := &ProjectInvestigator{
 		repoPath:     absPath,
 		cfg:          cfg,
@@ -133,6 +141,7 @@ func NewProjectInvestigator(ctx context.Context, repoPath string) (*ProjectInves
 		vcsProvider:  vcsP,
 		langProvider: langP,
 		store:        store,
+		callLogger:   clog,
 	}
 
 	return inv, nil
@@ -265,7 +274,17 @@ func (inv *ProjectInvestigator) RepoOverview(ctx context.Context, req cfeatures.
 	if err != nil {
 		return nil, fmt.Errorf("repo-overview: %w", err)
 	}
-	return invfeatures.RunRepoOverview(ctx, req, listing, inv.estimator)
+	resp, err := invfeatures.RunRepoOverview(ctx, req, listing, inv.estimator)
+	if err != nil {
+		return nil, err
+	}
+	inv.appendCall(calllog.Record{
+		Feature:         "repo-overview",
+		BudgetRequested: req.Budget,
+		BudgetUsed:      resp.Metrics.Budget.Used,
+		LatencyMs:       resp.Metrics.Timing.DurationMs,
+	})
+	return resp, nil
 }
 
 func (inv *ProjectInvestigator) ExplainFile(ctx context.Context, req cfeatures.ExplainFileRequest) (*cfeatures.ExplainFileResponse, error) {
@@ -273,7 +292,18 @@ func (inv *ProjectInvestigator) ExplainFile(ctx context.Context, req cfeatures.E
 	if err != nil {
 		return nil, fmt.Errorf("explain-file: %w", err)
 	}
-	return invfeatures.RunExplainFile(ctx, req, listing, inv.estimator)
+	resp, err := invfeatures.RunExplainFile(ctx, req, listing, inv.estimator)
+	if err != nil {
+		return nil, err
+	}
+	inv.appendCall(calllog.Record{
+		Feature:         "explain-file",
+		SeedFiles:       relPaths(inv.repoPath, []string{req.FilePath}),
+		BudgetRequested: req.Budget,
+		BudgetUsed:      resp.Metrics.Budget.Used,
+		LatencyMs:       resp.Metrics.Timing.DurationMs,
+	})
+	return resp, nil
 }
 
 func (inv *ProjectInvestigator) Related(ctx context.Context, req cfeatures.RelatedRequest) (*cfeatures.RelatedResponse, error) {
@@ -281,7 +311,18 @@ func (inv *ProjectInvestigator) Related(ctx context.Context, req cfeatures.Relat
 	if err != nil {
 		return nil, fmt.Errorf("related: %w", err)
 	}
-	return invfeatures.RunRelated(ctx, req, listing, inv.estimator)
+	resp, err := invfeatures.RunRelated(ctx, req, listing, inv.estimator)
+	if err != nil {
+		return nil, err
+	}
+	inv.appendCall(calllog.Record{
+		Feature:         "related",
+		SeedFiles:       relPaths(inv.repoPath, []string{req.FilePath}),
+		BudgetRequested: req.Budget,
+		BudgetUsed:      resp.Metrics.Budget.Used,
+		LatencyMs:       resp.Metrics.Timing.DurationMs,
+	})
+	return resp, nil
 }
 
 func (inv *ProjectInvestigator) Tests(ctx context.Context, req cfeatures.TestsRequest) (*cfeatures.TestsResponse, error) {
@@ -289,7 +330,18 @@ func (inv *ProjectInvestigator) Tests(ctx context.Context, req cfeatures.TestsRe
 	if err != nil {
 		return nil, fmt.Errorf("tests: %w", err)
 	}
-	return invfeatures.RunTests(ctx, req, listing, inv.estimator)
+	resp, err := invfeatures.RunTests(ctx, req, listing, inv.estimator)
+	if err != nil {
+		return nil, err
+	}
+	inv.appendCall(calllog.Record{
+		Feature:         "tests",
+		SeedFiles:       relPaths(inv.repoPath, []string{req.FilePath}),
+		BudgetRequested: req.Budget,
+		BudgetUsed:      resp.Metrics.Budget.Used,
+		LatencyMs:       resp.Metrics.Timing.DurationMs,
+	})
+	return resp, nil
 }
 
 func (inv *ProjectInvestigator) Impact(ctx context.Context, req cfeatures.ImpactRequest) (*cfeatures.ImpactResponse, error) {
@@ -299,14 +351,26 @@ func (inv *ProjectInvestigator) Impact(ctx context.Context, req cfeatures.Impact
 	}
 
 	var vcsResult *provider.ProviderResult[provider.VCSDiff]
+	var vcsErr error
 	if inv.vcsProvider != nil && req.GitRef != "" {
-		vcsResult, err = inv.vcsProvider.Diff(ctx, req.GitRef, "")
-		if err != nil {
-			return nil, fmt.Errorf("impact: getting diff: %w", err)
+		vcsResult, vcsErr = inv.vcsProvider.Diff(ctx, req.GitRef, "")
+		if vcsErr != nil {
+			return nil, fmt.Errorf("impact: getting diff: %w", vcsErr)
 		}
 	}
 
-	return invfeatures.RunImpact(ctx, req, listing, vcsResult, inv.estimator)
+	resp, err := invfeatures.RunImpact(ctx, req, listing, vcsResult, inv.estimator)
+	if err != nil {
+		return nil, err
+	}
+	inv.appendCall(calllog.Record{
+		Feature:         "impact",
+		SeedFiles:       relPaths(inv.repoPath, req.FilePaths),
+		BudgetRequested: req.Budget,
+		BudgetUsed:      resp.Metrics.Budget.Used,
+		LatencyMs:       resp.Metrics.Timing.DurationMs,
+	})
+	return resp, nil
 }
 
 func (inv *ProjectInvestigator) Context(ctx context.Context, req cfeatures.ContextRequest) (*cfeatures.ContextResponse, error) {
@@ -322,7 +386,24 @@ func (inv *ProjectInvestigator) Context(ctx context.Context, req cfeatures.Conte
 		langProv = inv.langProvider
 	}
 
-	return invfeatures.RunContext(ctx, req, listing, inv.estimator, langProv)
+	resp, err := invfeatures.RunContext(ctx, req, listing, inv.estimator, langProv)
+	if err != nil {
+		return nil, err
+	}
+	inv.appendCall(calllog.Record{
+		Feature:            "context",
+		SeedFiles:          relPaths(inv.repoPath, req.Files),
+		FilesReturned:      resp.IncludedRelPaths,
+		CandidatesTotal:    resp.FilesConsidered,
+		FilesIncluded:      resp.FilesIncluded,
+		CompressionRatio:   resp.CompressionRatio,
+		BudgetRequested:    req.Budget,
+		BudgetUsed:         resp.Metrics.Budget.Used,
+		LatencyMs:          resp.Metrics.Timing.DurationMs,
+		ImportEdgesScanned: resp.Metrics.ContextReduction.ImportEdgesScanned,
+		LspEnhanced:        resp.Metrics.ContextReduction.LspEnhanced,
+	})
+	return resp, nil
 }
 
 func (inv *ProjectInvestigator) FailureContext(ctx context.Context, req cfeatures.FailureContextRequest) (*cfeatures.FailureContextResponse, error) {
@@ -337,7 +418,17 @@ func (inv *ProjectInvestigator) FailureContext(ctx context.Context, req cfeature
 		langProv = inv.langProvider
 	}
 
-	return invfeatures.RunFailureContext(ctx, req, listing, inv.estimator, langProv)
+	resp, err := invfeatures.RunFailureContext(ctx, req, listing, inv.estimator, langProv)
+	if err != nil {
+		return nil, err
+	}
+	inv.appendCall(calllog.Record{
+		Feature:         "failure-context",
+		BudgetRequested: req.Budget,
+		BudgetUsed:      resp.Metrics.Budget.Used,
+		LatencyMs:       resp.Metrics.Timing.DurationMs,
+	})
+	return resp, nil
 }
 
 func (inv *ProjectInvestigator) VerifyPlan(ctx context.Context, req cfeatures.VerifyPlanRequest) (*cfeatures.VerifyPlanResponse, error) {
@@ -347,18 +438,28 @@ func (inv *ProjectInvestigator) VerifyPlan(ctx context.Context, req cfeatures.Ve
 	}
 
 	var vcsResult *provider.ProviderResult[provider.VCSDiff]
+	var vcsErr error
 	if inv.vcsProvider != nil && req.GitRef != "" {
-		vcsResult, err = inv.vcsProvider.Diff(ctx, req.GitRef, "")
-		if err != nil {
-			return nil, fmt.Errorf("verify-plan: getting diff: %w", err)
+		vcsResult, vcsErr = inv.vcsProvider.Diff(ctx, req.GitRef, "")
+		if vcsErr != nil {
+			return nil, fmt.Errorf("verify-plan: getting diff: %w", vcsErr)
 		}
 	}
 
-	return invfeatures.RunVerifyPlan(ctx, req, listing, vcsResult, inv.estimator)
+	resp, err := invfeatures.RunVerifyPlan(ctx, req, listing, vcsResult, inv.estimator)
+	if err != nil {
+		return nil, err
+	}
+	inv.appendCall(calllog.Record{
+		Feature:         "verify-plan",
+		SeedFiles:       relPaths(inv.repoPath, req.FilePaths),
+		BudgetRequested: req.Budget,
+		BudgetUsed:      resp.Metrics.Budget.Used,
+		LatencyMs:       resp.Metrics.Timing.DurationMs,
+	})
+	return resp, nil
 }
 
-// GetFileSymbols returns the symbol names defined in the file at absPath.
-// Returns an empty slice (not an error) when gopls is not yet ready.
 // GoplsReady reports whether the gopls subprocess has been started and is ready
 // to answer symbol queries. Returns false when no language provider is attached.
 func (inv *ProjectInvestigator) GoplsReady() bool {
@@ -368,6 +469,8 @@ func (inv *ProjectInvestigator) GoplsReady() bool {
 	return inv.langProvider.GoplsReady()
 }
 
+// GetFileSymbols returns the symbol names defined in the file at absPath.
+// Returns an empty slice (not an error) when gopls is not yet ready.
 func (inv *ProjectInvestigator) GetFileSymbols(ctx context.Context, absPath string) ([]string, error) {
 	if inv.langProvider == nil {
 		return nil, nil
@@ -397,7 +500,6 @@ func (inv *ProjectInvestigator) ensureFileListing(ctx context.Context) (*provide
 	}
 	inv.mu.RUnlock()
 
-	// Need to (re)load.
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
 
@@ -413,6 +515,47 @@ func (inv *ProjectInvestigator) ensureFileListing(ctx context.Context) (*provide
 
 	inv.fileListing = listing
 	return listing, nil
+}
+
+// appendCall appends a calllog record non-fatally. Failures are logged to
+// stderr with the [sc investigator] prefix so the operator can diagnose issues,
+// but they never block or error the feature call itself.
+func (inv *ProjectInvestigator) appendCall(r calllog.Record) {
+	if inv.callLogger == nil {
+		return
+	}
+	if err := inv.callLogger.Append(r); err != nil {
+		logf("warn: calllog: %v", err)
+	}
+}
+
+// relPaths converts a slice of potentially-absolute paths to paths relative to
+// repoPath. Already-relative paths are returned unchanged.
+func relPaths(repoPath string, paths []string) []string {
+	if len(paths) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(paths))
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		rel, err := filepath.Rel(repoPath, p)
+		if err != nil || len(rel) > len(p) {
+			// Not under repoPath or error — use as-is.
+			out = append(out, filepath.ToSlash(p))
+		} else {
+			out = append(out, filepath.ToSlash(rel))
+		}
+	}
+	return out
+}
+
+// logf writes a timestamped message to stderr with the [sc investigator] prefix.
+func logf(format string, args ...any) {
+	ts := time.Now().Format("15:04:05.000")
+	msg := fmt.Sprintf(format, args...)
+	fmt.Fprintf(os.Stderr, "[sc investigator] %s %s\n", ts, msg)
 }
 
 func shortHash(h string) string {

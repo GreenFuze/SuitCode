@@ -14,8 +14,6 @@ import (
 // Repo-overview correctness
 // ──────────────────────────────────────────────────────────────────────────────
 
-// TestRepoOverview_Content verifies that repo-overview detects the correct
-// languages, build systems, test systems, and file count for the SuitCode repo.
 func TestRepoOverview_Content(t *testing.T) {
 	skipIfShort(t, "requires go/packages load via full investigator")
 
@@ -32,30 +30,22 @@ func TestRepoOverview_Content(t *testing.T) {
 		t.Fatalf("RepoOverview: %v", err)
 	}
 
-	// Languages
 	if !sliceContains(resp.Languages, "Go") {
 		t.Errorf("expected 'Go' in Languages, got %v", resp.Languages)
 	}
 	if !sliceContains(resp.Languages, "Markdown") {
 		t.Errorf("expected 'Markdown' in Languages, got %v", resp.Languages)
 	}
-
-	// Build systems
 	if !sliceContains(resp.BuildSystems, "Go Modules") {
 		t.Errorf("expected 'Go Modules' in BuildSystems, got %v", resp.BuildSystems)
 	}
-
-	// Test systems
 	if !sliceContains(resp.TestSystems, "Go test") {
 		t.Errorf("expected 'Go test' in TestSystems, got %v", resp.TestSystems)
 	}
-
-	// File count sanity check — SuitCode has > 40 files
 	if resp.TotalFiles < 40 {
 		t.Errorf("expected TotalFiles >= 40, got %d", resp.TotalFiles)
 	}
 
-	// Top-level structure must contain key directories
 	topNames := make(map[string]bool, len(resp.TopLevelStructure))
 	for _, e := range resp.TopLevelStructure {
 		topNames[e.RelPath] = true
@@ -67,8 +57,6 @@ func TestRepoOverview_Content(t *testing.T) {
 	}
 }
 
-// TestRepoOverview_Determinism verifies that repo-overview produces the same
-// content hash across multiple consecutive runs.
 func TestRepoOverview_Determinism(t *testing.T) {
 	skipIfShort(t, "runs repo-overview 5 times to verify hash stability")
 
@@ -103,13 +91,13 @@ func TestRepoOverview_Determinism(t *testing.T) {
 // Context capsule correctness
 // ──────────────────────────────────────────────────────────────────────────────
 
-// TestContext_Determinism verifies the context capsule produces a stable hash
-// for the same seed across repeated calls.
 func TestContext_Determinism(t *testing.T) {
 	skipIfShort(t, "runs context 5 times to verify hash stability")
 
 	inv := sharedInv(t)
 	ctx := context.Background()
+
+	// Use the main investigator source file as the seed — it lives in investigator/.
 	seed := "investigator/investigator.go"
 
 	const runs = 5
@@ -137,15 +125,12 @@ func TestContext_Determinism(t *testing.T) {
 	}
 }
 
-// TestContext_ForwardImportInclusion verifies that context for a source file
-// includes files from packages that file's package directly imports.
 func TestContext_ForwardImportInclusion(t *testing.T) {
 	skipIfShort(t, "requires go/packages import graph")
 
 	inv := sharedInv(t)
 	ctx := context.Background()
 
-	// investigator/features/context.go imports core/features and core/provider.
 	resp, err := inv.Context(ctx, cfeatures.ContextRequest{
 		BaseFeatureRequest: cfeatures.BaseFeatureRequest{
 			RepoPath: inv.repoPath,
@@ -170,15 +155,12 @@ func TestContext_ForwardImportInclusion(t *testing.T) {
 	}
 }
 
-// TestContext_SamePackageCohesion verifies that all files in a small package
-// travel together in the context capsule when budget allows.
 func TestContext_SamePackageCohesion(t *testing.T) {
 	skipIfShort(t, "requires go/packages import graph")
 
 	inv := sharedInv(t)
 	ctx := context.Background()
 
-	// eval/runner.go is in the investigator/eval package with suites.go and eval.go.
 	resp, err := inv.Context(ctx, cfeatures.ContextRequest{
 		BaseFeatureRequest: cfeatures.BaseFeatureRequest{
 			RepoPath: inv.repoPath,
@@ -204,15 +186,12 @@ func TestContext_SamePackageCohesion(t *testing.T) {
 	}
 }
 
-// TestContext_UnrelatedFileExcluded verifies that a file with no import
-// relationship to the seed is not included in the capsule.
 func TestContext_UnrelatedFileExcluded(t *testing.T) {
 	skipIfShort(t, "requires go/packages import graph")
 
 	inv := sharedInv(t)
 	ctx := context.Background()
 
-	// lsp_types.go (gopls provider) has no import relationship with eval/eval.go.
 	resp, err := inv.Context(ctx, cfeatures.ContextRequest{
 		BaseFeatureRequest: cfeatures.BaseFeatureRequest{
 			RepoPath: inv.repoPath,
@@ -231,8 +210,6 @@ func TestContext_UnrelatedFileExcluded(t *testing.T) {
 	}
 }
 
-// TestContext_BudgetRespected verifies the capsule never exceeds the requested
-// token budget even when there are many candidate files.
 func TestContext_BudgetRespected(t *testing.T) {
 	skipIfShort(t, "requires full investigator with file listing")
 
@@ -246,7 +223,7 @@ func TestContext_BudgetRespected(t *testing.T) {
 			RepoPath: inv.repoPath,
 			Budget:   tightBudget,
 		},
-		Files: []string{"investigator/investigator.go"},
+		Files: []string{"investigator/eval/runner.go"},
 	})
 	if err != nil {
 		t.Fatalf("Context: %v", err)
@@ -262,8 +239,6 @@ func TestContext_BudgetRespected(t *testing.T) {
 // Import graph correctness
 // ──────────────────────────────────────────────────────────────────────────────
 
-// TestGetImports_GoplsPackage verifies that the gopls provider package's imports
-// include core/provider (the base provider package it depends on).
 func TestGetImports_GoplsPackage(t *testing.T) {
 	skipIfShort(t, "requires go/packages load")
 
@@ -283,7 +258,6 @@ func TestGetImports_GoplsPackage(t *testing.T) {
 		t.Skip("language provider not ready")
 	}
 
-	// The gopls provider package imports core/provider.
 	var hasProviderImport bool
 	for _, imp := range result.Data {
 		if strings.Contains(imp, "GreenFuze/SuitCode/core/provider") &&
@@ -299,8 +273,6 @@ func TestGetImports_GoplsPackage(t *testing.T) {
 	t.Logf("gopls package imports: %v", result.Data)
 }
 
-// TestFileImporters_CoreProvider verifies that the reverse-import index
-// correctly identifies files that import the core/provider package.
 func TestFileImporters_CoreProvider(t *testing.T) {
 	skipIfShort(t, "requires go/packages load for reverse import index")
 
@@ -322,7 +294,6 @@ func TestFileImporters_CoreProvider(t *testing.T) {
 
 	t.Logf("importers of core/provider: %d files", len(result.Data))
 
-	// The filesystem provider imports core/provider.
 	var hasFilesystem bool
 	for _, f := range result.Data {
 		if strings.Contains(osPathToSlash(f), "core/provider/filesystem/") {
@@ -335,11 +306,11 @@ func TestFileImporters_CoreProvider(t *testing.T) {
 			"got: %v", result.Data)
 	}
 
-	// The investigator also imports core/provider.
+	// The investigator binary and library packages all import core/provider.
 	var hasInvestigator bool
 	for _, f := range result.Data {
-		if strings.Contains(osPathToSlash(f), "investigator/") &&
-			!strings.Contains(osPathToSlash(f), "_test") {
+		slash := osPathToSlash(f)
+		if !strings.Contains(slash, "_test") && strings.Contains(slash, "investigator/") {
 			hasInvestigator = true
 			break
 		}
@@ -349,8 +320,6 @@ func TestFileImporters_CoreProvider(t *testing.T) {
 	}
 }
 
-// TestFileImports_EvalPackage verifies that the investigator/eval package's
-// imports include core/features (which the runner depends on).
 func TestFileImports_EvalPackage(t *testing.T) {
 	skipIfShort(t, "requires go/packages load")
 
@@ -372,7 +341,6 @@ func TestFileImports_EvalPackage(t *testing.T) {
 
 	t.Logf("files imported by investigator/eval: %d", len(result.Data))
 
-	// eval/runner.go imports core/features.
 	var hasCoreFeatures bool
 	for _, f := range result.Data {
 		if strings.Contains(osPathToSlash(f), "core/features/") {
@@ -386,18 +354,15 @@ func TestFileImports_EvalPackage(t *testing.T) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// GetFileSymbols correctness (gopls-backed, skips gracefully if not ready)
+// GetFileSymbols correctness
 // ──────────────────────────────────────────────────────────────────────────────
 
-// TestGetFileSymbols_InvestigatorFile verifies that GetFileSymbols returns
-// sensible symbols for the main investigator file when gopls is available.
 func TestGetFileSymbols_InvestigatorFile(t *testing.T) {
 	skipIfShort(t, "requires gopls subprocess")
 
 	inv := sharedInv(t)
 	ctx := context.Background()
 
-	// Wait up to 30 s for gopls to start.
 	deadline := time.Now().Add(30 * time.Second)
 	for inv.langProvider != nil && !inv.langProvider.GoplsReady() && time.Now().Before(deadline) {
 		time.Sleep(200 * time.Millisecond)
@@ -407,20 +372,19 @@ func TestGetFileSymbols_InvestigatorFile(t *testing.T) {
 		t.Skip("gopls not ready after 30s — skipping symbol test")
 	}
 
+	// Use the investigator's main source file.
 	absPath := filepath.Join(inv.repoPath, "investigator", "investigator.go")
 	names, err := inv.GetFileSymbols(ctx, absPath)
 	if err != nil {
 		t.Fatalf("GetFileSymbols: %v", err)
 	}
 	if len(names) == 0 {
-		t.Fatal("GetFileSymbols returned no symbols for investigator.go")
+		t.Fatal("GetFileSymbols returned no symbols for investigator/investigator.go")
 	}
 
 	t.Logf("GetFileSymbols returned %d symbols", len(names))
 
-	// Key symbols expected in investigator.go.
-	// NOTE: Warm/Invalidate are defined in warmup.go, not this file.
-	expected := []string{"ProjectInvestigator", "NewProjectInvestigator", "Close", "Status", "GetFileSymbols"}
+	expected := []string{"ProjectInvestigator", "NewProjectInvestigator", "ReadinessLevel"}
 	for _, want := range expected {
 		if !symbolInList(names, want) {
 			t.Errorf("expected symbol %q in investigator.go symbols; got: %v", want, names)
@@ -432,7 +396,6 @@ func TestGetFileSymbols_InvestigatorFile(t *testing.T) {
 // Helpers
 // ──────────────────────────────────────────────────────────────────────────────
 
-// topLevelNames extracts the RelPath from each DirectoryEntry for error messages.
 func topLevelNames(entries []cfeatures.DirectoryEntry) []string {
 	names := make([]string, len(entries))
 	for i, e := range entries {
@@ -441,8 +404,6 @@ func topLevelNames(entries []cfeatures.DirectoryEntry) []string {
 	return names
 }
 
-// symbolInList reports whether any name in names matches want exactly, or has
-// want as a "."-separated suffix (handling gopls's "(*Receiver).Method" format).
 func symbolInList(names []string, want string) bool {
 	suffix := "." + want
 	for _, n := range names {

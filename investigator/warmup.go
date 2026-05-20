@@ -26,15 +26,14 @@ func (inv *ProjectInvestigator) Warm(ctx context.Context) error {
 	if inv.vcsProvider != nil {
 		status, err := inv.vcsProvider.Status(ctx)
 		if err != nil {
-			// VCS failure is non-fatal at level 1; record a limitation and
-			// continue.
-			fmt.Printf("SuitCode [warn]: vcs status failed: %v\n", err)
+			logf("warn: vcs status failed: %v", err)
 		} else {
 			inv.vcsStatus = status
 		}
 	}
 
 	inv.readiness = ReadinessLevel1
+	logf("readiness level 1 — repo identity ready")
 
 	// ── Level 2: full file index ──────────────────────────────────────────────
 	listing, err := inv.fsProvider.ListFiles(ctx)
@@ -44,18 +43,19 @@ func (inv *ProjectInvestigator) Warm(ctx context.Context) error {
 
 	inv.fileListing = listing
 	inv.readiness = ReadinessLevel2
+	logf("readiness level 2 — file index ready (%d files)", listing.Data.TotalFiles)
 
 	// ── Level 3: import graph (Go language provider) ──────────────────────────
 	if inv.langProvider != nil {
 		if inv.langProvider.Ready() {
 			inv.readiness = ReadinessLevel3
 			if inv.langProvider.GoplsReady() {
-				fmt.Printf("SuitCode: go language provider ready (package graph + gopls)\n")
+				logf("readiness level 3 — package graph + gopls ready")
 			} else {
-				fmt.Printf("SuitCode: go language provider ready (package graph; gopls still starting)\n")
+				logf("readiness level 3 — package graph ready (gopls still starting)")
 			}
 		} else {
-			fmt.Printf("SuitCode [warn]: go language provider not ready — staying at level 2\n")
+			logf("warn: go language provider not ready — staying at level 2")
 		}
 	}
 
@@ -65,6 +65,7 @@ func (inv *ProjectInvestigator) Warm(ctx context.Context) error {
 	now := time.Now()
 	inv.lastWarmed = &now
 
+	logf("warmup complete in %dms — readiness: %s", elapsed.Milliseconds(), inv.readiness)
 	return nil
 }
 
