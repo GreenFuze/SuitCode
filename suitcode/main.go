@@ -12,13 +12,12 @@
 package main
 
 import (
-	"archive/zip"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -240,13 +239,19 @@ func newStatusCmd(repoPath string) *cobra.Command {
 		Use:   "status",
 		Short: "Show coordinator + investigator readiness status",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := ensureCoordinator(defaultCoordinatorURL); err != nil {
+			// Ensure the coordinator is running before querying health.
+			stopCoord := logProgress("connecting to coordinator...")
+			err := ensureCoordinator(defaultCoordinatorURL)
+			stopCoord()
+			if err != nil {
 				return err
 			}
+
 			client := NewCoordinatorClient(defaultCoordinatorURL, repoPath)
 
-			logf("checking coordinator health...")
+			stopHealth := logProgress("checking coordinator health...")
 			health, err := client.GetHealth(cmd.Context())
+			stopHealth()
 			if err != nil {
 				return fmt.Errorf("status: %w", err)
 			}
@@ -273,25 +278,25 @@ on first run. Subsequent calls return immediately.
 Run this before a coding session to avoid cold-start latency on the first
 agent invocation.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			stopCoord := logProgress("connecting to coordinator...")
 			client, err := readyClient(repoPath)
+			stopCoord()
 			if err != nil {
 				return err
 			}
 
-			logf("requesting warmup for %s (may take up to 90 seconds)...", repoPath)
-			fmt.Printf("Warming up investigator for %s...\n", repoPath)
-			fmt.Printf("This loads the Go import graph and starts gopls. Please wait.\n\n")
-
 			start := time.Now()
-			if err := client.Warmup(cmd.Context()); err != nil {
+
+			stopWarm := logProgress("waiting for investigator to warm up and reach level 3 readiness (import graph + gopls)...")
+			err = client.Warmup(cmd.Context())
+			stopWarm()
+			if err != nil {
 				return fmt.Errorf("warmup: %w", err)
 			}
 
 			elapsed := time.Since(start).Round(time.Millisecond)
 			logf("warmup complete in %s", elapsed)
-			fmt.Printf("✓ Investigator warm (took %s)\n", elapsed)
-			fmt.Printf("  Project: %s\n", repoPath)
-			fmt.Printf("  Import graph and gopls are ready for fast queries.\n")
+			fmt.Printf("investigator warm (took %s) · project: %s\n", elapsed, repoPath)
 			return nil
 		},
 	}
@@ -309,19 +314,22 @@ func newRepoOverviewCmd(repoPath string) *cobra.Command {
 		Use:   "repo-overview",
 		Short: "Repository structure and technology overview",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			stopCoord := logProgress("connecting to coordinator...")
 			client, err := readyClient(repoPath)
+			stopCoord()
 			if err != nil {
 				return err
 			}
 
-			logf("requesting repo-overview...")
 			req := cfeatures.RepoOverviewRequest{
 				BaseFeatureRequest: cfeatures.BaseFeatureRequest{
 					RepoPath: repoPath, Budget: budget, Format: cfeatures.OutputFormat(format),
 				},
 			}
 
+			stopFeature := logProgress("computing repo-overview...")
 			resp, err := client.RepoOverview(cmd.Context(), req)
+			stopFeature()
 			if err != nil {
 				return err
 			}
@@ -351,12 +359,14 @@ func newExplainFileCmd(repoPath string) *cobra.Command {
 			if path == "" {
 				return fmt.Errorf("--path is required")
 			}
+
+			stopCoord := logProgress("connecting to coordinator...")
 			client, err := readyClient(repoPath)
+			stopCoord()
 			if err != nil {
 				return err
 			}
 
-			logf("requesting explain-file for %s...", path)
 			req := cfeatures.ExplainFileRequest{
 				BaseFeatureRequest: cfeatures.BaseFeatureRequest{
 					RepoPath: repoPath, Budget: budget, Format: cfeatures.OutputFormat(format),
@@ -364,7 +374,9 @@ func newExplainFileCmd(repoPath string) *cobra.Command {
 				FilePath: path,
 			}
 
+			stopFeature := logProgress(fmt.Sprintf("computing explain-file for %s...", path))
 			resp, err := client.ExplainFile(cmd.Context(), req)
+			stopFeature()
 			if err != nil {
 				return err
 			}
@@ -394,12 +406,14 @@ func newRelatedCmd(repoPath string) *cobra.Command {
 			if path == "" {
 				return fmt.Errorf("--path is required")
 			}
+
+			stopCoord := logProgress("connecting to coordinator...")
 			client, err := readyClient(repoPath)
+			stopCoord()
 			if err != nil {
 				return err
 			}
 
-			logf("requesting related for %s...", path)
 			req := cfeatures.RelatedRequest{
 				BaseFeatureRequest: cfeatures.BaseFeatureRequest{
 					RepoPath: repoPath, Budget: budget, Format: cfeatures.OutputFormat(format),
@@ -407,7 +421,9 @@ func newRelatedCmd(repoPath string) *cobra.Command {
 				FilePath: path,
 			}
 
+			stopFeature := logProgress(fmt.Sprintf("computing related files for %s...", path))
 			resp, err := client.Related(cmd.Context(), req)
+			stopFeature()
 			if err != nil {
 				return err
 			}
@@ -435,12 +451,13 @@ func newTestsCmd(repoPath string) *cobra.Command {
 		Use:   "tests",
 		Short: "Find tests relevant to a source file or change",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			stopCoord := logProgress("connecting to coordinator...")
 			client, err := readyClient(repoPath)
+			stopCoord()
 			if err != nil {
 				return err
 			}
 
-			logf("requesting tests...")
 			req := cfeatures.TestsRequest{
 				BaseFeatureRequest: cfeatures.BaseFeatureRequest{
 					RepoPath: repoPath, Budget: budget, Format: cfeatures.OutputFormat(format),
@@ -449,7 +466,9 @@ func newTestsCmd(repoPath string) *cobra.Command {
 				DiffRef:  from,
 			}
 
+			stopFeature := logProgress("computing relevant tests...")
 			resp, err := client.Tests(cmd.Context(), req)
+			stopFeature()
 			if err != nil {
 				return err
 			}
@@ -481,12 +500,14 @@ func newImpactCmd(repoPath string) *cobra.Command {
 			if from == "" && files == "" {
 				return fmt.Errorf("--from or --files is required")
 			}
+
+			stopCoord := logProgress("connecting to coordinator...")
 			client, err := readyClient(repoPath)
+			stopCoord()
 			if err != nil {
 				return err
 			}
 
-			logf("requesting impact analysis...")
 			req := cfeatures.ImpactRequest{
 				BaseFeatureRequest: cfeatures.BaseFeatureRequest{
 					RepoPath: repoPath, Budget: budget, Format: cfeatures.OutputFormat(format),
@@ -497,7 +518,9 @@ func newImpactCmd(repoPath string) *cobra.Command {
 				req.FilePaths = splitComma(files)
 			}
 
+			stopFeature := logProgress("computing blast radius...")
 			resp, err := client.Impact(cmd.Context(), req)
+			stopFeature()
 			if err != nil {
 				return err
 			}
@@ -529,12 +552,14 @@ func newContextCmd(repoPath string) *cobra.Command {
 			if files == "" && from == "" {
 				return fmt.Errorf("--files or --from is required")
 			}
+
+			stopCoord := logProgress("connecting to coordinator...")
 			client, err := readyClient(repoPath)
+			stopCoord()
 			if err != nil {
 				return err
 			}
 
-			logf("requesting context capsule...")
 			req := cfeatures.ContextRequest{
 				BaseFeatureRequest: cfeatures.BaseFeatureRequest{
 					RepoPath: repoPath, Budget: budget, Format: cfeatures.OutputFormat(format),
@@ -545,7 +570,9 @@ func newContextCmd(repoPath string) *cobra.Command {
 				req.Files = splitComma(files)
 			}
 
+			stopFeature := logProgress("compiling context capsule...")
 			resp, err := client.Context(cmd.Context(), req)
+			stopFeature()
 			if err != nil {
 				return err
 			}
@@ -578,12 +605,14 @@ func newFailureContextCmd(repoPath string) *cobra.Command {
 			if logPath == "" {
 				return fmt.Errorf("--log is required")
 			}
+
+			stopCoord := logProgress("connecting to coordinator...")
 			client, err := readyClient(repoPath)
+			stopCoord()
 			if err != nil {
 				return err
 			}
 
-			logf("requesting failure-context for %s...", logPath)
 			req := cfeatures.FailureContextRequest{
 				BaseFeatureRequest: cfeatures.BaseFeatureRequest{
 					RepoPath: repoPath, Budget: budget, Format: cfeatures.OutputFormat(format),
@@ -591,7 +620,9 @@ func newFailureContextCmd(repoPath string) *cobra.Command {
 				LogPath: logPath,
 			}
 
+			stopFeature := logProgress(fmt.Sprintf("extracting failure context from %s...", logPath))
 			resp, err := client.FailureContext(cmd.Context(), req)
+			stopFeature()
 			if err != nil {
 				return err
 			}
@@ -622,12 +653,14 @@ func newVerifyPlanCmd(repoPath string) *cobra.Command {
 			if from == "" && files == "" {
 				return fmt.Errorf("--from or --files is required")
 			}
+
+			stopCoord := logProgress("connecting to coordinator...")
 			client, err := readyClient(repoPath)
+			stopCoord()
 			if err != nil {
 				return err
 			}
 
-			logf("requesting verify-plan...")
 			req := cfeatures.VerifyPlanRequest{
 				BaseFeatureRequest: cfeatures.BaseFeatureRequest{
 					RepoPath: repoPath, Budget: budget, Format: cfeatures.OutputFormat(format),
@@ -638,7 +671,9 @@ func newVerifyPlanCmd(repoPath string) *cobra.Command {
 				req.FilePaths = splitComma(files)
 			}
 
+			stopFeature := logProgress("generating verification plan...")
 			resp, err := client.VerifyPlan(cmd.Context(), req)
+			stopFeature()
 			if err != nil {
 				return err
 			}
@@ -683,48 +718,9 @@ func newMetricsShowCmd(repoPath string) *cobra.Command {
 				return fmt.Errorf("metrics show: %w", err)
 			}
 
-			records, err := clog.LoadAll()
-			if err != nil {
+			if err := clog.PrintSummary(os.Stdout, last); err != nil {
 				return fmt.Errorf("metrics show: %w", err)
 			}
-			if len(records) == 0 {
-				fmt.Println("No call records found in", clog.Path())
-				return nil
-			}
-
-			if last > 0 && len(records) > last {
-				records = records[len(records)-last:]
-			}
-
-			fmt.Printf("%-20s  %-18s  %-8s  %-12s  %-8s  %-10s\n",
-				"Feature", "Time", "Files", "Budget", "Latency", "Compression")
-			fmt.Println(strings.Repeat("-", 85))
-
-			for _, r := range records {
-				ts := r.TS
-				if t, err := time.Parse(time.RFC3339, r.TS); err == nil {
-					ts = t.Local().Format("2006-01-02 15:04")
-				}
-				filesCol := "-"
-				if r.CandidatesTotal > 0 {
-					filesCol = fmt.Sprintf("%d/%d", r.FilesIncluded, r.CandidatesTotal)
-				}
-				budgetCol := fmt.Sprintf("%d", r.BudgetUsed)
-				if r.BudgetRequested > 0 {
-					budgetCol = fmt.Sprintf("%d/%d", r.BudgetUsed, r.BudgetRequested)
-				}
-				compressionCol := "-"
-				if r.CandidatesTotal > 0 {
-					saved := int((1 - r.CompressionRatio) * 100)
-					compressionCol = fmt.Sprintf("%d%%", saved)
-				}
-
-				fmt.Printf("%-20s  %-18s  %-8s  %-12s  %-8s  %-10s\n",
-					truncate(r.Feature, 20), ts, filesCol, budgetCol,
-					fmt.Sprintf("%dms", r.LatencyMs), compressionCol)
-			}
-
-			fmt.Printf("\n%d records  ·  %s\n", len(records), clog.Path())
 			return nil
 		},
 	}
@@ -745,19 +741,11 @@ func newMetricsExportCmd(repoPath string) *cobra.Command {
 				return fmt.Errorf("metrics export: %w", err)
 			}
 
-			src := clog.Path()
-			if _, err := os.Stat(src); err != nil {
-				if os.IsNotExist(err) {
-					return fmt.Errorf("metrics export: no call log found at %s", src)
-				}
-				return fmt.Errorf("metrics export: %w", err)
-			}
-
 			if outputPath == "" {
 				outputPath = filepath.Join(repoPath, config.SuitCodeDir, "metrics.zip")
 			}
 
-			if err := zipFile(src, outputPath); err != nil {
+			if err := clog.Export(outputPath); err != nil {
 				return fmt.Errorf("metrics export: %w", err)
 			}
 
@@ -825,44 +813,48 @@ func logf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "[sc client] %s %s\n", ts, msg)
 }
 
+// logProgress prints banner immediately to stderr, then spawns a goroutine that
+// logs "still waiting... (Xs)" every 5 seconds. Call the returned stop function
+// when the operation completes. stop is idempotent and safe to call once.
+//
+// This gives agents a continuous liveness signal while waiting for slow
+// operations (coordinator startup, investigator warmup, large graph traversals).
+func logProgress(banner string) (stop func()) {
+	done := make(chan struct{})
+	var once sync.Once
+
+	// Print the initial banner immediately so the agent sees what we're doing.
+	logf("%s", banner)
+
+	go func() {
+		const interval = 5 * time.Second
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		start := time.Now()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				elapsed := int(time.Since(start).Seconds())
+				logf("still waiting... (%ds)", elapsed)
+			}
+		}
+	}()
+
+	return func() {
+		once.Do(func() { close(done) })
+	}
+}
+
 func splitComma(s string) []string {
 	var out []string
-	for _, part := range strings.Split(s, ",") {
+	for part := range strings.SplitSeq(s, ",") {
 		part = strings.TrimSpace(part)
 		if part != "" {
 			out = append(out, part)
 		}
 	}
 	return out
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n-1] + "…"
-}
-
-func zipFile(src, dst string) error {
-	zf, err := os.Create(dst)
-	if err != nil {
-		return fmt.Errorf("create zip %q: %w", dst, err)
-	}
-	defer zf.Close()
-
-	w := zip.NewWriter(zf)
-	defer w.Close()
-
-	srcFile, err := os.Open(src)
-	if err != nil {
-		return fmt.Errorf("open source %q: %w", src, err)
-	}
-	defer srcFile.Close()
-
-	entry, err := w.Create(filepath.Base(src))
-	if err != nil {
-		return fmt.Errorf("zip entry: %w", err)
-	}
-	_, err = io.Copy(entry, srcFile)
-	return err
 }
