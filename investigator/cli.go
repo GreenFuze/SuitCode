@@ -1,11 +1,9 @@
 package main
 
 import (
-	"archive/zip"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -593,6 +591,7 @@ func newVerifyPlanCmd(repoPath string) *cobra.Command {
 
 func newServeCmd(repoPath string) *cobra.Command {
 	var port int
+	var coordinatorURL string
 
 	cmd := &cobra.Command{
 		Use:   "serve",
@@ -609,12 +608,14 @@ func newServeCmd(repoPath string) *cobra.Command {
 			}
 
 			logf("starting HTTP server on :%d for %s", port, repoPath)
-			srv := NewServer(inv, port)
+			srv := NewServer(inv, port, coordinatorURL)
 			return srv.ListenAndServe()
 		},
 	}
 
 	cmd.Flags().IntVar(&port, "port", 7878, "TCP port to listen on")
+	cmd.Flags().StringVar(&coordinatorURL, "coordinator-url", "",
+		"base URL of the coordinator that spawned this investigator (e.g. http://127.0.0.1:7878)")
 	return cmd
 }
 
@@ -661,7 +662,7 @@ func newEvalRunCmd(repoPath string) *cobra.Command {
 				return fmt.Errorf("eval run: %w", err)
 			}
 
-			printEvalReport(run)
+			run.PrintReport(os.Stdout)
 
 			if run.Summary.Failed > 0 {
 				os.Exit(1)
@@ -699,58 +700,7 @@ func newMetricsShowCmd(repoPath string) *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("metrics show: %w", err)
 			}
-
-			records, err := clog.LoadAll()
-			if err != nil {
-				return fmt.Errorf("metrics show: %w", err)
-			}
-			if len(records) == 0 {
-				fmt.Println("No call records found in", clog.Path())
-				return nil
-			}
-
-			// Trim to last N if requested.
-			if last > 0 && len(records) > last {
-				records = records[len(records)-last:]
-			}
-
-			// Header
-			fmt.Printf("%-20s  %-18s  %-8s  %-12s  %-8s  %-10s\n",
-				"Feature", "Time", "Files", "Budget", "Latency", "Compression")
-			fmt.Println(strings.Repeat("-", 85))
-
-			for _, r := range records {
-				ts := r.TS
-				if t, err := time.Parse(time.RFC3339, r.TS); err == nil {
-					ts = t.Local().Format("2006-01-02 15:04")
-				}
-				filesCol := "-"
-				if r.CandidatesTotal > 0 {
-					filesCol = fmt.Sprintf("%d/%d", r.FilesIncluded, r.CandidatesTotal)
-				}
-				budgetCol := fmt.Sprintf("%d", r.BudgetUsed)
-				if r.BudgetRequested > 0 {
-					budgetCol = fmt.Sprintf("%d/%d", r.BudgetUsed, r.BudgetRequested)
-				}
-				latencyCol := fmt.Sprintf("%dms", r.LatencyMs)
-				compressionCol := "-"
-				if r.CandidatesTotal > 0 {
-					saved := int((1 - r.CompressionRatio) * 100)
-					compressionCol = fmt.Sprintf("%d%%", saved)
-				}
-
-				fmt.Printf("%-20s  %-18s  %-8s  %-12s  %-8s  %-10s\n",
-					truncate(r.Feature, 20),
-					ts,
-					filesCol,
-					budgetCol,
-					latencyCol,
-					compressionCol,
-				)
-			}
-
-			fmt.Printf("\n%d records  ·  %s\n", len(records), clog.Path())
-			return nil
+			return clog.PrintSummary(os.Stdout, last)
 		},
 	}
 
@@ -770,19 +720,11 @@ func newMetricsExportCmd(repoPath string) *cobra.Command {
 				return fmt.Errorf("metrics export: %w", err)
 			}
 
-			src := clog.Path()
-			if _, err := os.Stat(src); err != nil {
-				if os.IsNotExist(err) {
-					return fmt.Errorf("metrics export: no call log found at %s", src)
-				}
-				return fmt.Errorf("metrics export: %w", err)
-			}
-
 			if outputPath == "" {
 				outputPath = filepath.Join(repoPath, config.SuitCodeDir, "metrics.zip")
 			}
 
-			if err := zipFile(src, outputPath); err != nil {
+			if err := clog.Export(outputPath); err != nil {
 				return fmt.Errorf("metrics export: %w", err)
 			}
 
@@ -889,76 +831,3 @@ func splitComma(s string) []string {
 	return out
 }
 
-// truncate shortens s to at most n characters, appending "…" if truncated.
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n-1] + "…"
-}
-
-// zipFile creates a zip archive at dst containing the single file at src.
-func zipFile(src, dst string) error {
-	zf, err := os.Create(dst)
-	if err != nil {
-		return fmt.Errorf("create zip %q: %w", dst, err)
-	}
-	defer zf.Close()
-
-	w := zip.NewWriter(zf)
-	defer w.Close()
-
-	srcFile, err := os.Open(src)
-	if err != nil {
-		return fmt.Errorf("open source %q: %w", src, err)
-	}
-	defer srcFile.Close()
-
-	entry, err := w.Create(filepath.Base(src))
-	if err != nil {
-		return fmt.Errorf("zip entry: %w", err)
-	}
-	_, err = io.Copy(entry, srcFile)
-	return err
-}
-
-// printEvalReport writes a human-readable eval report to stdout.
-func printEvalReport(run *eval.EvalRun) {
-	verdict := "PASSED"
-	if run.Summary.Failed > 0 {
-		verdict = "FAILED"
-	}
-
-	fmt.Printf("# Eval Report: %s\n\n", run.Suite)
-	fmt.Printf("**Verdict:** %s  \n", verdict)
-	fmt.Printf("**Score:** %d/%d scenarios passed (%.0f%%)\n\n",
-		run.Summary.Passed, run.Summary.Total, run.Summary.Score*100)
-	fmt.Printf("| Scenario | Result | Details |\n")
-	fmt.Printf("|----------|--------|--------|\n")
-
-	for _, r := range run.Results {
-		icon := "✓"
-		if !r.Passed {
-			icon = "✗"
-		}
-		details := ""
-		if len(r.Metrics) > 0 {
-			var parts []string
-			for _, m := range r.Metrics {
-				parts = append(parts, m.Detail)
-			}
-			details = strings.Join(parts, "; ")
-		}
-		if len(r.Notes) > 0 {
-			details += " " + strings.Join(r.Notes, "; ")
-		}
-		fmt.Printf("| %s %s | %s | %s |\n", icon, r.ScenarioName,
-			map[bool]string{true: "passed", false: "failed"}[r.Passed],
-			details)
-	}
-
-	fmt.Printf("\n_Run ID: %s · %s → %s_\n",
-		run.ID,
-		run.StartedAt.Format("15:04:05"),
-		run.FinishedAt.Format("15:04:05"))
-}

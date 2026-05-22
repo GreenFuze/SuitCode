@@ -30,48 +30,139 @@ import (
 
 const defaultCoordinatorURL = "http://127.0.0.1:7878"
 
-// usage is shown when the repo-path argument is missing.
-const usage = `SuitCode — local repository intelligence for coding agents
+// usage is the full reference shown for --help / -h / usage / bare invocation.
+const usage = `SuitCode — deterministic repository intelligence for coding agents
+
+Connects to a per-project investigator daemon (auto-started on first use) to
+answer structural questions about a repository: import graphs, related files,
+test mappings, context capsules, blast-radius analysis, and verification plans.
 
 USAGE:
   suitcode <repo-path> <command> [flags]
 
-ARGUMENTS:
-  repo-path   Path to the repository to analyse (required).
-              May be relative (../myrepo) or absolute (/home/user/myrepo).
-              Unlike many CLIs, this tool does NOT default to the current
-              directory — the path must be given explicitly.
+  <repo-path> is always the first argument. It may be relative (".", "../x")
+  or absolute. SuitCode never defaults to the current directory.
+
+WORKFLOW:
+  Run "warmup" once at the start of a session to load the import graph and
+  start gopls. All other commands work without it, but return richer results
+  once the investigator is fully initialized (~30–90 s on first run).
+
+    suitcode . warmup
 
 COMMANDS:
-  status             Show coordinator + investigator readiness status
-  warmup             Pre-warm the investigator (spawns it and waits for level 3)
-  repo-overview      Repository structure and technology overview
-  explain-file       Explain a file's role, imports, tests, and relationships
-  related            Find files related to a given file
-  tests              Find tests relevant to a source file or change
-  impact             Blast radius analysis for a set of changes
-  context            Compile a bounded context capsule for a set of files
-  failure-context    Extract useful context from a failure log
-  verify-plan        Generate a verification plan for a set of changes
-  metrics            Show or export per-call metrics from .suitcode/calls.jsonl
+  status           Show whether the coordinator and investigator are running
+                   and at what readiness level.
 
-Run 'suitcode <repo-path> <command> --help' for per-command flags.
+  warmup           Ensure the investigator is fully initialized (import
+                   graph + gopls ready). Blocks until ready. Idempotent —
+                   safe to call even if already warm.
+
+  repo-overview    High-level map of the repository: detected languages,
+                   build systems, top-level layout, and notable directories.
+
+  explain-file     Role, imports, reverse-dependents, related tests, and
+                   exported symbols for a single file.
+                     --path <file>  [required]
+
+  related          Files most related to a seed file, ranked by import-graph
+                   proximity and naming heuristics.
+                     --path <file>  [required]
+
+  tests            Test files and ready-to-run test commands relevant to a
+                   source file or to all files changed since a git ref.
+                     --path <file>        (tests for one file)
+                     --from <git-ref>     (tests for all changes since ref)
+
+  impact           Blast-radius analysis for a set of changed files:
+                   downstream importers, affected tests, risky interface
+                   boundaries, generated-file warnings.
+                     --files <f1,f2,...>  or  --from <git-ref>  [one required]
+
+  context          Compile a token-budgeted context capsule for a set of seed
+                   files. This is the primary "gather context before editing"
+                   command. Candidates are scored and ranked by relevance, then
+                   trimmed to fit the budget.
+                     --files <f1,f2,...>  or  --from <git-ref>  [one required]
+                     --budget <tokens>    (default 8000)
+
+  failure-context  Extract structured context from a build or test failure log:
+                   suspected source files, test names, and a bounded context
+                   capsule for the failure site.
+                     --log <path-to-failure-output>  [required]
+
+  verify-plan      Generate a verification checklist (build, test, vet, lint
+                   commands) that covers the changed files.
+                     --files <f1,f2,...>  or  --from <git-ref>  [one required]
+
+  metrics          Show or export per-call timing and token-budget statistics.
+    show             Print a table of recent calls (--last N, default 50)
+    export           Package the call log as a shareable zip
+
+OUTPUT:
+  By default every command prints a one-line summary to stdout and emits
+  timing/budget/hash diagnostics to stderr.
+
+  Pass --format json to receive the full structured response on stdout.
+  Agents should use --format json for programmatic use — the JSON contains
+  all evidence, provenance, metrics, and limitation notices.
 
 EXAMPLES:
-  suitcode . status
-  suitcode . warmup
-  suitcode /path/to/myrepo repo-overview --budget 3000
-  suitcode . context --files internal/foo.go,internal/bar.go --budget 8000
-  suitcode . metrics show
+  # Pre-warm once per coding session (do this first)
+  suitcode /path/to/repo warmup
+
+  # Understand the overall repository structure
+  suitcode . repo-overview --format json
+
+  # Gather bounded context before editing a file
+  suitcode . context --files internal/auth/token.go --budget 8000
+
+  # Gather context for everything changed since branching from main
+  suitcode . context --from main --budget 12000 --format json
+
+  # Explain what a specific file does
+  suitcode . explain-file --path internal/auth/token.go --format json
+
+  # Find tests to run after changing a file
+  suitcode . tests --path internal/auth/token.go
+
+  # Find all tests affected by commits since main
+  suitcode . tests --from main --format json
+
+  # Understand the blast radius of a set of changes
+  suitcode . impact --files internal/auth/token.go,internal/auth/session.go
+
+  # Diagnose a failing CI run (save the log output to a file first)
+  suitcode . failure-context --log /tmp/ci-failure.txt --format json
+
+  # Generate a pre-PR verification checklist
+  suitcode . verify-plan --from main --format json
+
+Run 'suitcode <repo-path> <command> --help' for per-command flags.
 `
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Entry point
 // ──────────────────────────────────────────────────────────────────────────────
 
+// isHelpArg reports whether the argument is a recognised help/usage request.
+func isHelpArg(s string) bool {
+	switch s {
+	case "-h", "--help", "help", "usage":
+		return true
+	}
+	return false
+}
+
 func main() {
-	// Pre-processing: strip and validate the mandatory <repo-path> argument.
-	if len(os.Args) < 2 || strings.HasPrefix(os.Args[1], "-") {
+	// Bare invocation or explicit help request → print usage cleanly and exit 0.
+	if len(os.Args) < 2 || isHelpArg(os.Args[1]) {
+		fmt.Print(usage)
+		os.Exit(0)
+	}
+
+	// Fail fast if the first arg looks like a flag rather than a path.
+	if strings.HasPrefix(os.Args[1], "-") {
 		fmt.Fprint(os.Stderr, usage)
 		fmt.Fprintln(os.Stderr, "error: repo-path is required as the first argument")
 		os.Exit(1)
@@ -117,6 +208,10 @@ func newRootCmd(repoPath string) *cobra.Command {
 		Short:         "SuitCode — local repository intelligence for coding agents",
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		// Show full usage when the user supplies a valid repo-path but no subcommand.
+		Run: func(_ *cobra.Command, _ []string) {
+			fmt.Print(usage)
+		},
 	}
 
 	root.AddCommand(
@@ -156,7 +251,7 @@ func newStatusCmd(repoPath string) *cobra.Command {
 				return fmt.Errorf("status: %w", err)
 			}
 
-			fmt.Printf("Coordinator: OK (projects=%v)\n", health["projects"])
+			fmt.Printf("Coordinator: OK (projects=%d)\n", health.Projects)
 			fmt.Printf("Project:     %s\n", repoPath)
 			return nil
 		},
@@ -178,17 +273,17 @@ on first run. Subsequent calls return immediately.
 Run this before a coding session to avoid cold-start latency on the first
 agent invocation.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := ensureCoordinator(defaultCoordinatorURL); err != nil {
+			client, err := readyClient(repoPath)
+			if err != nil {
 				return err
 			}
-			client := NewCoordinatorClient(defaultCoordinatorURL, repoPath)
 
 			logf("requesting warmup for %s (may take up to 90 seconds)...", repoPath)
 			fmt.Printf("Warming up investigator for %s...\n", repoPath)
 			fmt.Printf("This loads the Go import graph and starts gopls. Please wait.\n\n")
 
 			start := time.Now()
-			if err := client.PostWarmup(cmd.Context()); err != nil {
+			if err := client.Warmup(cmd.Context()); err != nil {
 				return fmt.Errorf("warmup: %w", err)
 			}
 
@@ -226,17 +321,15 @@ func newRepoOverviewCmd(repoPath string) *cobra.Command {
 				},
 			}
 
-			raw, err := client.Post(cmd.Context(), "repo-overview", req)
+			resp, err := client.RepoOverview(cmd.Context(), req)
 			if err != nil {
 				return err
 			}
 
-			return printFeatureResult(raw, format, func(v map[string]any) {
-				totalFiles, _ := v["total_files"].(float64)
-				languages := countSlice(v, "languages")
-				buildSystems := countSlice(v, "build_systems")
-				fmt.Printf("Repository overview: %.0f files · %d languages · %d build systems\n",
-					totalFiles, languages, buildSystems)
+			return printFeatureResult(resp, format, func(resp *cfeatures.RepoOverviewResponse) {
+				printProgress(resp.BaseFeatureResponse)
+				fmt.Printf("Repository overview: %d files · %d languages · %d build systems\n",
+					resp.TotalFiles, len(resp.Languages), len(resp.BuildSystems))
 			})
 		},
 	}
@@ -271,14 +364,14 @@ func newExplainFileCmd(repoPath string) *cobra.Command {
 				FilePath: path,
 			}
 
-			raw, err := client.Post(cmd.Context(), "explain-file", req)
+			resp, err := client.ExplainFile(cmd.Context(), req)
 			if err != nil {
 				return err
 			}
 
-			return printFeatureResult(raw, format, func(v map[string]any) {
-				budgetUsed := budgetUsedFromMetrics(v)
-				fmt.Printf("File explanation: %s · %d tokens\n", filepath.Base(path), budgetUsed)
+			return printFeatureResult(resp, format, func(resp *cfeatures.ExplainFileResponse) {
+				printProgress(resp.BaseFeatureResponse)
+				fmt.Printf("File explanation: %s · %d tokens\n", filepath.Base(path), resp.Metrics.Budget.Used)
 			})
 		},
 	}
@@ -314,15 +407,14 @@ func newRelatedCmd(repoPath string) *cobra.Command {
 				FilePath: path,
 			}
 
-			raw, err := client.Post(cmd.Context(), "related", req)
+			resp, err := client.Related(cmd.Context(), req)
 			if err != nil {
 				return err
 			}
 
-			return printFeatureResult(raw, format, func(v map[string]any) {
-				related := countSlice(v, "related_files")
-				budgetUsed := budgetUsedFromMetrics(v)
-				fmt.Printf("Related files: %d found · %d tokens\n", related, budgetUsed)
+			return printFeatureResult(resp, format, func(resp *cfeatures.RelatedResponse) {
+				printProgress(resp.BaseFeatureResponse)
+				fmt.Printf("Related files: %d found · %d tokens\n", len(resp.RelatedFiles), resp.Metrics.Budget.Used)
 			})
 		},
 	}
@@ -357,15 +449,14 @@ func newTestsCmd(repoPath string) *cobra.Command {
 				DiffRef:  from,
 			}
 
-			raw, err := client.Post(cmd.Context(), "tests", req)
+			resp, err := client.Tests(cmd.Context(), req)
 			if err != nil {
 				return err
 			}
 
-			return printFeatureResult(raw, format, func(v map[string]any) {
-				tests := countSlice(v, "relevant_tests")
-				budgetUsed := budgetUsedFromMetrics(v)
-				fmt.Printf("Relevant tests: %d found · %d tokens\n", tests, budgetUsed)
+			return printFeatureResult(resp, format, func(resp *cfeatures.TestsResponse) {
+				printProgress(resp.BaseFeatureResponse)
+				fmt.Printf("Relevant tests: %d found · %d tokens\n", len(resp.RelevantTests), resp.Metrics.Budget.Used)
 			})
 		},
 	}
@@ -406,15 +497,14 @@ func newImpactCmd(repoPath string) *cobra.Command {
 				req.FilePaths = splitComma(files)
 			}
 
-			raw, err := client.Post(cmd.Context(), "impact", req)
+			resp, err := client.Impact(cmd.Context(), req)
 			if err != nil {
 				return err
 			}
 
-			return printFeatureResult(raw, format, func(v map[string]any) {
-				impacted := countSlice(v, "impacted_files")
-				budgetUsed := budgetUsedFromMetrics(v)
-				fmt.Printf("Impact: %d downstream files · %d tokens\n", impacted, budgetUsed)
+			return printFeatureResult(resp, format, func(resp *cfeatures.ImpactResponse) {
+				printProgress(resp.BaseFeatureResponse)
+				fmt.Printf("Impact: %d downstream files · %d tokens\n", len(resp.ImpactedFiles), resp.Metrics.Budget.Used)
 			})
 		},
 	}
@@ -455,19 +545,16 @@ func newContextCmd(repoPath string) *cobra.Command {
 				req.Files = splitComma(files)
 			}
 
-			raw, err := client.Post(cmd.Context(), "context", req)
+			resp, err := client.Context(cmd.Context(), req)
 			if err != nil {
 				return err
 			}
 
-			return printFeatureResult(raw, format, func(v map[string]any) {
-				filesIncluded, _ := v["files_included"].(float64)
-				compressionRatio, _ := v["compression_ratio"].(float64)
-				saved := int((1 - compressionRatio) * 100)
-				budgetUsed := budgetUsedFromMetrics(v)
-				budgetRequested := budgetRequestedFromMetrics(v)
-				fmt.Printf("Context capsule: %.0f files · %d/%d tokens (%d%% saved)\n",
-					filesIncluded, budgetUsed, budgetRequested, saved)
+			return printFeatureResult(resp, format, func(resp *cfeatures.ContextResponse) {
+				printProgress(resp.BaseFeatureResponse)
+				saved := int((1 - resp.CompressionRatio) * 100)
+				fmt.Printf("Context capsule: %d files · %d/%d tokens (%d%% saved)\n",
+					resp.FilesIncluded, resp.Metrics.Budget.Used, resp.Metrics.Budget.Requested, saved)
 			})
 		},
 	}
@@ -504,15 +591,14 @@ func newFailureContextCmd(repoPath string) *cobra.Command {
 				LogPath: logPath,
 			}
 
-			raw, err := client.Post(cmd.Context(), "failure-context", req)
+			resp, err := client.FailureContext(cmd.Context(), req)
 			if err != nil {
 				return err
 			}
 
-			return printFeatureResult(raw, format, func(v map[string]any) {
-				suspected := countSlice(v, "suspected_files")
-				budgetUsed := budgetUsedFromMetrics(v)
-				fmt.Printf("Failure context: %d suspected files · %d tokens\n", suspected, budgetUsed)
+			return printFeatureResult(resp, format, func(resp *cfeatures.FailureContextResponse) {
+				printProgress(resp.BaseFeatureResponse)
+				fmt.Printf("Failure context: %d suspected files · %d tokens\n", len(resp.SuspectedFiles), resp.Metrics.Budget.Used)
 			})
 		},
 	}
@@ -552,15 +638,14 @@ func newVerifyPlanCmd(repoPath string) *cobra.Command {
 				req.FilePaths = splitComma(files)
 			}
 
-			raw, err := client.Post(cmd.Context(), "verify-plan", req)
+			resp, err := client.VerifyPlan(cmd.Context(), req)
 			if err != nil {
 				return err
 			}
 
-			return printFeatureResult(raw, format, func(v map[string]any) {
-				commands := countSlice(v, "commands")
-				budgetUsed := budgetUsedFromMetrics(v)
-				fmt.Printf("Verification plan: %d commands · %d tokens\n", commands, budgetUsed)
+			return printFeatureResult(resp, format, func(resp *cfeatures.VerifyPlanResponse) {
+				printProgress(resp.BaseFeatureResponse)
+				fmt.Printf("Verification plan: %d commands · %d tokens\n", len(resp.Commands), resp.Metrics.Budget.Used)
 			})
 		},
 	}
@@ -690,104 +775,43 @@ func newMetricsExportCmd(repoPath string) *cobra.Command {
 // Response printing helpers
 // ──────────────────────────────────────────────────────────────────────────────
 
-// printFeatureResult decodes a raw JSON response, emits metrics to stderr, and
-// either renders as JSON or calls briefSummary for default one-line output.
-func printFeatureResult(raw []byte, format string, briefSummary func(map[string]any)) error {
-	var v map[string]any
-	if err := json.Unmarshal(raw, &v); err != nil {
-		// Fallback: print raw bytes if not parseable JSON.
-		fmt.Println(string(raw))
-		return nil
-	}
-
-	// Always emit timing/budget info to stderr so agents can see progress.
-	printProgress(v)
-
+// printFeatureResult is a generic helper that handles JSON pass-through and
+// brief-summary rendering for any typed feature response. T is inferred from
+// the brief function's parameter. The brief callback is responsible for calling
+// printProgress and emitting its own one-line summary to stdout.
+func printFeatureResult[T any](resp *T, format string, brief func(*T)) error {
 	if format == "json" {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		enc.SetEscapeHTML(false)
-		return enc.Encode(v)
+		return writeJSON(resp)
 	}
-
-	briefSummary(v)
+	brief(resp)
 	return nil
 }
 
-// printProgress extracts and logs timing/budget info from the metrics block.
-func printProgress(v map[string]any) {
-	metrics, _ := v["metrics"].(map[string]any)
-	if metrics == nil {
-		return
-	}
+// writeJSON pretty-prints any value as indented JSON to stdout.
+func writeJSON(v any) error {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	enc.SetEscapeHTML(false)
+	return enc.Encode(v)
+}
 
-	timing, _ := metrics["timing"].(map[string]any)
-	budget, _ := metrics["budget"].(map[string]any)
-
-	var durationMs float64
-	if timing != nil {
-		durationMs, _ = timing["duration_ms"].(float64)
-	}
-
-	var budgetUsed, budgetRequested float64
-	if budget != nil {
-		budgetUsed, _ = budget["used"].(float64)
-		budgetRequested, _ = budget["requested"].(float64)
-	}
-
-	hash, _ := metrics["deterministic_hash"].(string)
+// printProgress logs timing, budget, and limitation info to stderr so agents
+// can see feature call progress without it polluting stdout.
+func printProgress(base cfeatures.BaseFeatureResponse) {
+	m := base.Metrics
+	hash := m.DeterministicHash
 	if len(hash) > 12 {
 		hash = hash[:12]
 	}
+	logf("done in %dms · budget %d/%d · hash %s",
+		m.Timing.DurationMs, m.Budget.Used, m.Budget.Requested, hash)
 
-	logf("done in %.0fms · budget %.0f/%.0f · hash %s",
-		durationMs, budgetUsed, budgetRequested, hash)
-
-	if isPartial, _ := v["is_partial"].(bool); isPartial {
+	if base.IsPartial {
 		logf("partial result — response may be incomplete")
 	}
-	if lims, ok := v["limitations"].([]any); ok {
-		for _, lim := range lims {
-			if limMap, ok := lim.(map[string]any); ok {
-				kind, _ := limMap["kind"].(string)
-				msg, _ := limMap["message"].(string)
-				logf("limitation/%s: %s", kind, msg)
-			}
-		}
+	for _, lim := range base.Limitations {
+		logf("limitation/%s: %s", lim.Kind, lim.Message)
 	}
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-// JSON extraction helpers
-// ──────────────────────────────────────────────────────────────────────────────
-
-func countSlice(v map[string]any, key string) int {
-	if arr, ok := v[key].([]any); ok {
-		return len(arr)
-	}
-	return 0
-}
-
-func budgetUsedFromMetrics(v map[string]any) int {
-	if m, ok := v["metrics"].(map[string]any); ok {
-		if b, ok := m["budget"].(map[string]any); ok {
-			if used, ok := b["used"].(float64); ok {
-				return int(used)
-			}
-		}
-	}
-	return 0
-}
-
-func budgetRequestedFromMetrics(v map[string]any) int {
-	if m, ok := v["metrics"].(map[string]any); ok {
-		if b, ok := m["budget"].(map[string]any); ok {
-			if req, ok := b["requested"].(float64); ok {
-				return int(req)
-			}
-		}
-	}
-	return 0
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

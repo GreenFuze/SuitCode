@@ -55,9 +55,34 @@ type GoLanguageProvider struct {
 	goplsClosed atomic.Bool
 }
 
-// New returns an unattached GoLanguageProvider. Call Attach before use.
-func New() *GoLanguageProvider {
-	return &GoLanguageProvider{}
+// NewGoLanguageProvider creates a GoLanguageProvider that is fully initialised
+// for the given repository root.
+//
+// Phase 1 (package graph) runs synchronously before returning. Phase 2 (gopls)
+// starts asynchronously in a background goroutine — check GoplsReady() when
+// symbol queries are needed.
+//
+// Failures in either phase are non-fatal: they are recorded as Limitations
+// accessible via the provider's query methods, so the caller always gets a
+// usable provider back. An error is only returned when repoPath is fundamentally
+// invalid (does not exist or is not a directory).
+func NewGoLanguageProvider(ctx context.Context, repoPath string) (*GoLanguageProvider, error) {
+	info, err := os.Stat(repoPath)
+	if err != nil || !info.IsDir() {
+		return nil, fmt.Errorf("go language provider: path is not a valid directory: %s", repoPath)
+	}
+
+	p := &GoLanguageProvider{repoPath: repoPath}
+
+	// Phase 1: load package graph synchronously (fast — in-process).
+	p.ensureLoaded(ctx)
+
+	// Phase 2: start gopls asynchronously. This can take a few seconds on
+	// first run (binary download + LSP handshake). context.Background() is
+	// used so the goroutine outlives the caller's ctx.
+	go p.ensureGoplsLoaded(context.Background())
+
+	return p, nil
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -72,36 +97,6 @@ func (p *GoLanguageProvider) Capabilities() provider.ProviderCapabilities {
 		Roles:       []provider.ProviderRole{provider.RoleLanguage},
 		Languages:   []string{"Go"},
 	}
-}
-
-// Attach validates the repo path, eagerly loads the package graph (Phase 1),
-// and starts the gopls subprocess asynchronously (Phase 2).
-// Load or start failures are non-fatal — they record Limitations.
-// Always returns nil.
-func (p *GoLanguageProvider) Attach(ctx context.Context, repoPath string) error {
-	info, err := os.Stat(repoPath)
-	if err != nil || !info.IsDir() {
-		p.mu.Lock()
-		p.limitations = append(p.limitations, provider.Limitation{
-			Kind:    "invalid_repo_path",
-			Message: fmt.Sprintf("path is not a valid directory: %s", repoPath),
-			Scope:   repoPath,
-		})
-		p.mu.Unlock()
-		return nil
-	}
-
-	p.repoPath = repoPath
-
-	// Phase 1: load package graph synchronously (fast — in-process).
-	p.ensureLoaded(ctx)
-
-	// Phase 2: start gopls asynchronously. This can take a few seconds on
-	// first run (binary download + LSP handshake). context.Background() is
-	// used so the goroutine is not cancelled when Attach's ctx is done.
-	go p.ensureGoplsLoaded(context.Background())
-
-	return nil
 }
 
 // Ready reports whether the Phase 1 package graph has been loaded successfully.
@@ -434,5 +429,5 @@ func notReadyResult[T any](accumulated []provider.Limitation) *provider.Provider
 // Compile-time interface assertions
 // ──────────────────────────────────────────────────────────────────────────────
 
-var _ provider.LanguageProvider    = (*GoLanguageProvider)(nil)
+var _ provider.LanguageProvider = (*GoLanguageProvider)(nil)
 var _ provider.ImportGraphProvider = (*GoLanguageProvider)(nil)

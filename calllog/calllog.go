@@ -3,9 +3,11 @@
 package calllog
 
 import (
+	"archive/zip"
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,3 +116,115 @@ func (l *Logger) LoadAll() ([]Record, error) {
 
 // Path returns the absolute path to the JSONL file.
 func (l *Logger) Path() string { return l.path }
+
+// PrintSummary writes a human-readable tabular summary of the most recent
+// records to w. Pass last = 0 to show all records.
+func (l *Logger) PrintSummary(w io.Writer, last int) error {
+	records, err := l.LoadAll()
+	if err != nil {
+		return err
+	}
+	if len(records) == 0 {
+		fmt.Fprintln(w, "No call records found in", l.path)
+		return nil
+	}
+
+	// Trim to last N if requested.
+	if last > 0 && len(records) > last {
+		records = records[len(records)-last:]
+	}
+
+	// Header row.
+	fmt.Fprintf(w, "%-20s  %-18s  %-8s  %-12s  %-8s  %-10s\n",
+		"Feature", "Time", "Files", "Budget", "Latency", "Compression")
+	fmt.Fprintln(w, strings.Repeat("-", 85))
+
+	// Data rows.
+	for _, r := range records {
+		ts := r.TS
+		if t, parseErr := time.Parse(time.RFC3339, r.TS); parseErr == nil {
+			ts = t.Local().Format("2006-01-02 15:04")
+		}
+
+		filesCol := "-"
+		if r.CandidatesTotal > 0 {
+			filesCol = fmt.Sprintf("%d/%d", r.FilesIncluded, r.CandidatesTotal)
+		}
+
+		budgetCol := fmt.Sprintf("%d", r.BudgetUsed)
+		if r.BudgetRequested > 0 {
+			budgetCol = fmt.Sprintf("%d/%d", r.BudgetUsed, r.BudgetRequested)
+		}
+
+		latencyCol := fmt.Sprintf("%dms", r.LatencyMs)
+
+		compressionCol := "-"
+		if r.CandidatesTotal > 0 {
+			saved := int((1 - r.CompressionRatio) * 100)
+			compressionCol = fmt.Sprintf("%d%%", saved)
+		}
+
+		fmt.Fprintf(w, "%-20s  %-18s  %-8s  %-12s  %-8s  %-10s\n",
+			truncate(r.Feature, 20),
+			ts,
+			filesCol,
+			budgetCol,
+			latencyCol,
+			compressionCol,
+		)
+	}
+
+	fmt.Fprintf(w, "\n%d records  ·  %s\n", len(records), l.path)
+	return nil
+}
+
+// Export packages the call log into a zip archive at outputPath.
+// The zip contains only the JSONL file — no code content or absolute paths.
+// outputPath is created or truncated; its parent directory must already exist.
+func (l *Logger) Export(outputPath string) error {
+	src := l.path
+	if _, err := os.Stat(src); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("calllog: no call log found at %s", src)
+		}
+		return fmt.Errorf("calllog: stat %q: %w", src, err)
+	}
+
+	// Create the output zip.
+	zf, err := os.Create(outputPath)
+	if err != nil {
+		return fmt.Errorf("calllog: create zip %q: %w", outputPath, err)
+	}
+	defer zf.Close()
+
+	zw := zip.NewWriter(zf)
+	defer zw.Close()
+
+	// Open the source JSONL file.
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("calllog: open source %q: %w", src, err)
+	}
+	defer srcFile.Close()
+
+	// Add the JSONL file to the archive under its base name.
+	entry, err := zw.Create(filepath.Base(src))
+	if err != nil {
+		return fmt.Errorf("calllog: create zip entry: %w", err)
+	}
+
+	if _, err := io.Copy(entry, srcFile); err != nil {
+		return fmt.Errorf("calllog: write zip entry: %w", err)
+	}
+
+	return nil
+}
+
+// truncate shortens s to at most n runes, appending "…" if truncated.
+func truncate(s string, n int) string {
+	runes := []rune(s)
+	if len(runes) <= n {
+		return s
+	}
+	return string(runes[:n-1]) + "…"
+}

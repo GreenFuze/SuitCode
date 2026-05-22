@@ -23,9 +23,18 @@ type Provider struct {
 	ready    bool
 }
 
-// New returns a new, unattached VCS Provider.
-func New() *Provider {
-	return &Provider{}
+// NewVCSProvider creates a VCSProvider that is fully initialised for the given
+// repository root. An error is returned when repoPath is not a git repository.
+func NewVCSProvider(ctx context.Context, repoPath string) (*Provider, error) {
+	p := &Provider{}
+	out, err := p.run(ctx, repoPath, "git", "rev-parse", "--git-dir")
+	if err != nil {
+		return nil, fmt.Errorf("vcs provider: %q does not appear to be a git repository: %w", repoPath, err)
+	}
+	_ = out
+	p.repoPath = repoPath
+	p.ready = true
+	return p, nil
 }
 
 // Capabilities satisfies provider.Provider.
@@ -35,18 +44,6 @@ func (p *Provider) Capabilities() provider.ProviderCapabilities {
 		DisplayName: "VCS Provider (git)",
 		Roles:       []provider.ProviderRole{provider.RoleVCS},
 	}
-}
-
-// Attach verifies that the path contains a git repository.
-func (p *Provider) Attach(ctx context.Context, repoPath string) error {
-	out, err := p.run(ctx, repoPath, "git", "rev-parse", "--git-dir")
-	if err != nil {
-		return fmt.Errorf("vcs provider: %q does not appear to be a git repository: %w", repoPath, err)
-	}
-	_ = out
-	p.repoPath = repoPath
-	p.ready = true
-	return nil
 }
 
 // Ready reports whether the provider is attached to a valid git repository.

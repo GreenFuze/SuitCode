@@ -4,7 +4,6 @@
 // packages.
 package provider
 
-import "context"
 
 // ProviderID uniquely identifies a registered provider.
 type ProviderID string
@@ -30,16 +29,14 @@ type ProviderCapabilities struct {
 }
 
 // Provider is the base contract every provider must satisfy.
+// Initialization (attaching to a repository) is a constructor concern handled
+// by each provider's own New* function, not part of this behavioral interface.
 type Provider interface {
 	// Capabilities returns static metadata about this provider.
 	Capabilities() ProviderCapabilities
 
-	// Attach initialises the provider against the given repository root.
-	// Must be called before any role-specific methods.
-	Attach(ctx context.Context, repoPath string) error
-
-	// Ready reports whether Attach has succeeded and the provider can
-	// answer queries.
+	// Ready reports whether the provider has been successfully initialised and
+	// can answer queries.
 	Ready() bool
 
 	// Close releases any resources held by the provider (e.g. sub-processes,

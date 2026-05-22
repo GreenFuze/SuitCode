@@ -52,12 +52,7 @@ func (r *Runner) Run(ctx context.Context, suite SuiteID) (*EvalRun, error) {
 		return nil, fmt.Errorf("eval runner: unknown suite %q; available: smoke, context-reduction, go-provider, go-provider-symbols", suite)
 	}
 
-	run := &EvalRun{
-		ID:        fmt.Sprintf("eval-%s-%d", suite, time.Now().UnixMilli()),
-		Suite:     suite,
-		RepoPath:  r.repoPath,
-		StartedAt: time.Now(),
-	}
+	run := newEvalRun(suite, r.repoPath)
 
 	for _, sc := range scenarios {
 		result := r.runScenario(ctx, sc)
@@ -72,11 +67,7 @@ func (r *Runner) Run(ctx context.Context, suite SuiteID) (*EvalRun, error) {
 
 // runScenario executes a single scenario and returns its result.
 func (r *Runner) runScenario(ctx context.Context, sc EvalScenario) EvalResult {
-	result := EvalResult{
-		ScenarioID:   sc.ID,
-		ScenarioName: sc.Name,
-		Passed:       true,
-	}
+	result := newEvalResult(sc)
 
 	switch sc.Kind {
 	case KindDeterminism:
@@ -102,11 +93,7 @@ func (r *Runner) runScenario(ctx context.Context, sc EvalScenario) EvalResult {
 // ──────────────────────────────────────────────────────────────────────────────
 
 func (r *Runner) checkDeterminism(ctx context.Context, sc EvalScenario) EvalResult {
-	result := EvalResult{
-		ScenarioID:   sc.ID,
-		ScenarioName: sc.Name,
-		Passed:       true,
-	}
+	result := newEvalResult(sc)
 
 	n := sc.Expectation.RepeatCount
 	if n < 2 {
@@ -186,11 +173,7 @@ func (r *Runner) checkDeterminism(ctx context.Context, sc EvalScenario) EvalResu
 }
 
 func (r *Runner) checkBudgetCompliance(ctx context.Context, sc EvalScenario) EvalResult {
-	result := EvalResult{
-		ScenarioID:   sc.ID,
-		ScenarioName: sc.Name,
-		Passed:       true,
-	}
+	result := newEvalResult(sc)
 
 	budget := sc.Expectation.BudgetLimit
 	if budget == 0 {
@@ -243,11 +226,7 @@ func (r *Runner) checkBudgetCompliance(ctx context.Context, sc EvalScenario) Eva
 }
 
 func (r *Runner) checkContextCompression(ctx context.Context, sc EvalScenario) EvalResult {
-	result := EvalResult{
-		ScenarioID:   sc.ID,
-		ScenarioName: sc.Name,
-		Passed:       true,
-	}
+	result := newEvalResult(sc)
 
 	budget := sc.Expectation.BudgetLimit
 	if budget == 0 {
@@ -306,11 +285,7 @@ func (r *Runner) checkContextCompression(ctx context.Context, sc EvalScenario) E
 // ExpectedFile appears in the capsule (and every ForbiddenFile does not).
 // It also records the import_edges_scanned metric for observability.
 func (r *Runner) checkGoldenFiles(ctx context.Context, sc EvalScenario) EvalResult {
-	result := EvalResult{
-		ScenarioID:   sc.ID,
-		ScenarioName: sc.Name,
-		Passed:       true,
-	}
+	result := newEvalResult(sc)
 
 	budget := sc.Expectation.BudgetLimit
 	if budget == 0 {
@@ -405,11 +380,7 @@ func (r *Runner) checkGoldenFiles(ctx context.Context, sc EvalScenario) EvalResu
 // every ExpectedSymbol appears in the result. Waits up to 30 s for gopls to
 // become ready; fails the scenario if gopls never starts or returns no symbols.
 func (r *Runner) checkGoldenSymbols(ctx context.Context, sc EvalScenario) EvalResult {
-	result := EvalResult{
-		ScenarioID:   sc.ID,
-		ScenarioName: sc.Name,
-		Passed:       true,
-	}
+	result := newEvalResult(sc)
 
 	seeds := sc.Expectation.SeedFiles
 	if len(seeds) == 0 {

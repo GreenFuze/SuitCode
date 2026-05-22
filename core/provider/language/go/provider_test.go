@@ -11,30 +11,32 @@ import (
 	goprovider "github.com/GreenFuze/SuitCode/core/provider/language/go"
 )
 
-// attachedProvider creates and attaches a GoLanguageProvider to the SuitCode
-// repo root. Marks the test as fatal if attach fails unexpectedly.
-func attachedProvider(t *testing.T) *goprovider.GoLanguageProvider {
+// newProvider creates a fully initialised GoLanguageProvider for the SuitCode
+// repo root. Marks the test as fatal when construction fails.
+func newProvider(t *testing.T) *goprovider.GoLanguageProvider {
 	t.Helper()
 	root := repoRoot(t)
-	p := goprovider.New()
-	if err := p.Attach(context.Background(), root); err != nil {
-		t.Fatalf("Attach(%q): %v", root, err)
+	p, err := goprovider.NewGoLanguageProvider(context.Background(), root)
+	if err != nil {
+		t.Fatalf("NewGoLanguageProvider(%q): %v", root, err)
 	}
 	return p
 }
 
-// TestGoLanguageProvider_AttachAndReady verifies that attaching to the
-// SuitCode module marks the provider as ready.
-func TestGoLanguageProvider_AttachAndReady(t *testing.T) {
-	p := attachedProvider(t)
+// TestGoLanguageProvider_NewAndReady verifies that NewGoLanguageProvider
+// constructs a ready provider in one step.
+func TestGoLanguageProvider_NewAndReady(t *testing.T) {
+	p := newProvider(t)
 	if !p.Ready() {
-		t.Error("expected Ready() == true after successful Attach")
+		t.Error("expected Ready() == true after successful construction")
 	}
 }
 
 // TestGoLanguageProvider_Capabilities verifies static metadata.
+// Capabilities() is pure — it does not need a repository, so we use the
+// zero-value struct directly rather than paying for a full construction.
 func TestGoLanguageProvider_Capabilities(t *testing.T) {
-	p := goprovider.New()
+	p := &goprovider.GoLanguageProvider{}
 	caps := p.Capabilities()
 
 	if caps.ID == "" {
@@ -51,7 +53,7 @@ func TestGoLanguageProvider_Capabilities(t *testing.T) {
 // TestGoLanguageProvider_GetImports verifies that GetImports returns non-empty
 // import path strings for a known file.
 func TestGoLanguageProvider_GetImports(t *testing.T) {
-	p := attachedProvider(t)
+	p := newProvider(t)
 	root := repoRoot(t)
 
 	absPath := filepath.Join(root, "core", "features", "context.go")
@@ -90,7 +92,7 @@ func TestGoLanguageProvider_GetSymbols(t *testing.T) {
 		t.Skip("skipping gopls integration test in short mode")
 	}
 
-	p := attachedProvider(t)
+	p := newProvider(t)
 	defer func() {
 		if err := p.Close(); err != nil {
 			t.Logf("Close(): %v", err)
@@ -128,9 +130,9 @@ func TestGoLanguageProvider_GetSymbols(t *testing.T) {
 			t.Errorf("unexpected 'gopls_not_ready' limitation when gopls is ready: %v", result.Limitations)
 		}
 
-		// gopls returns methods as "(*GoLanguageProvider).Attach" etc., so we
+		// gopls returns methods as "(*GoLanguageProvider).Ready" etc., so we
 		// use symbolPresent() which also matches on ".SymbolName" suffix.
-		expected := []string{"GoLanguageProvider", "New", "Attach", "Ready", "GoplsReady", "Close"}
+		expected := []string{"GoLanguageProvider", "NewGoLanguageProvider", "Ready", "GoplsReady", "Close"}
 		for _, want := range expected {
 			if !symbolPresent(result.Data, want) {
 				t.Errorf("expected symbol %q in result %v", want, result.Data)
@@ -158,7 +160,7 @@ func TestGoLanguageProvider_GetSymbols(t *testing.T) {
 // TestGoLanguageProvider_FileImports verifies that FileImports returns files
 // from packages that the seed file is known to import.
 func TestGoLanguageProvider_FileImports(t *testing.T) {
-	p := attachedProvider(t)
+	p := newProvider(t)
 	root := repoRoot(t)
 
 	// investigator/features/context.go imports core/features and core/provider.
@@ -192,7 +194,7 @@ func TestGoLanguageProvider_FileImports(t *testing.T) {
 // TestGoLanguageProvider_FileImporters verifies that FileImporters returns
 // files from packages known to import the seed's package.
 func TestGoLanguageProvider_FileImporters(t *testing.T) {
-	p := attachedProvider(t)
+	p := newProvider(t)
 	root := repoRoot(t)
 
 	// core/provider/roles.go is in core/provider.
@@ -218,13 +220,15 @@ func TestGoLanguageProvider_FileImporters(t *testing.T) {
 	}
 }
 
-// TestGoLanguageProvider_NotReadyGraceful verifies that calling methods on an
-// un-attached provider returns safe results with limitations, not panics.
+// TestGoLanguageProvider_NotReadyGraceful verifies that calling methods on a
+// zero-value (unattached) provider returns safe results with limitations,
+// not panics. The zero-value is used here deliberately to exercise the
+// "not-ready" code path without going through the constructor.
 func TestGoLanguageProvider_NotReadyGraceful(t *testing.T) {
-	p := goprovider.New()
+	p := &goprovider.GoLanguageProvider{}
 
 	if p.Ready() {
-		t.Error("fresh provider must not be ready before Attach")
+		t.Error("zero-value provider must not be ready")
 	}
 
 	ctx := context.Background()
@@ -255,7 +259,7 @@ func TestGoLanguageProvider_NotReadyGraceful(t *testing.T) {
 
 // TestGoLanguageProvider_CloseSafe verifies Close is a no-op and returns nil.
 func TestGoLanguageProvider_CloseSafe(t *testing.T) {
-	p := attachedProvider(t)
+	p := newProvider(t)
 	if err := p.Close(); err != nil {
 		t.Errorf("Close() returned unexpected error: %v", err)
 	}

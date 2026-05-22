@@ -24,10 +24,13 @@ type Coordinator struct {
 
 // NewCoordinator creates a Coordinator that will listen on the given port and
 // use invBinary to spawn investigator processes.
+// The coordinator's own URL (http://127.0.0.1:<port>) is forwarded to every
+// investigator it spawns so they can call back home.
 func NewCoordinator(port int, invBinary string) *Coordinator {
+	coordinatorURL := fmt.Sprintf("http://127.0.0.1:%d", port)
 	c := &Coordinator{
 		port:     port,
-		registry: NewRegistry(invBinary),
+		registry: NewRegistry(invBinary, coordinatorURL),
 	}
 
 	r := chi.NewRouter()
@@ -72,28 +75,58 @@ func (c *Coordinator) Shutdown(ctx context.Context) error {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// HTTP response types
+// ──────────────────────────────────────────────────────────────────────────────
+
+// coordinatorHealthPayload is the body returned by GET /api/v1/health.
+type coordinatorHealthPayload struct {
+	OK       bool   `json:"ok"`
+	Version  string `json:"version"`
+	Projects int    `json:"projects"`
+}
+
+// projectInfo describes one active investigator process.
+type projectInfo struct {
+	ProjectPath string `json:"project_path"`
+	Port        int    `json:"port"`
+	StartedAt   string `json:"started_at"`
+}
+
+// projectsPayload is the body returned by GET /api/v1/projects.
+type projectsPayload struct {
+	Projects []projectInfo `json:"projects"`
+}
+
+// warmupPayload is the body returned by POST /api/v1/warmup on success.
+type warmupPayload struct {
+	OK          bool   `json:"ok"`
+	ProjectPath string `json:"project_path"`
+	Port        int    `json:"port"`
+	StartedAt   string `json:"started_at"`
+}
+
+// errorPayload is the body returned for any error response.
+type errorPayload struct {
+	Error string `json:"error"`
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Handlers
 // ──────────────────────────────────────────────────────────────────────────────
 
 // handleHealth reports coordinator status.
 func (c *Coordinator) handleHealth(w http.ResponseWriter, r *http.Request) {
 	procs := c.registry.List()
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":         true,
-		"version":    "v1",
-		"projects":   len(procs),
+	writeJSON(w, http.StatusOK, coordinatorHealthPayload{
+		OK:       true,
+		Version:  "v1",
+		Projects: len(procs),
 	})
 }
 
 // handleProjects lists all active investigator processes.
 func (c *Coordinator) handleProjects(w http.ResponseWriter, r *http.Request) {
 	procs := c.registry.List()
-
-	type projectInfo struct {
-		ProjectPath string `json:"project_path"`
-		Port        int    `json:"port"`
-		StartedAt   string `json:"started_at"`
-	}
 
 	infos := make([]projectInfo, 0, len(procs))
 	for _, p := range procs {
@@ -104,9 +137,7 @@ func (c *Coordinator) handleProjects(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"projects": infos,
-	})
+	writeJSON(w, http.StatusOK, projectsPayload{Projects: infos})
 }
 
 // handleWarmup spawns an investigator for the requested project and waits
@@ -129,11 +160,11 @@ func (c *Coordinator) handleWarmup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	logf("warmup complete for %s (port %d)", projectPath, proc.Port)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":           true,
-		"project_path": proc.ProjectPath,
-		"port":         proc.Port,
-		"started_at":   proc.StartedAt.Format(time.RFC3339),
+	writeJSON(w, http.StatusOK, warmupPayload{
+		OK:          true,
+		ProjectPath: proc.ProjectPath,
+		Port:        proc.Port,
+		StartedAt:   proc.StartedAt.Format(time.RFC3339),
 	})
 }
 
@@ -214,5 +245,5 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func writeError(w http.ResponseWriter, status int, err error) {
-	writeJSON(w, status, map[string]string{"error": err.Error()})
+	writeJSON(w, status, errorPayload{Error: err.Error()})
 }

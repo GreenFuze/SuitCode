@@ -22,26 +22,50 @@ type InvestigatorProcess struct {
 	ProjectPath string
 	Port        int
 	BaseURL     string
-	Cmd         *exec.Cmd
+	Cmd         *exec.Cmd // nil when the process was reattached, not spawned by us
 	StartedAt   time.Time
+}
+
+// NewInvestigatorProcess constructs a fully-populated InvestigatorProcess.
+// BaseURL is derived from port so callers never duplicate the formula.
+// Pass a nil cmd for reattached processes the coordinator did not spawn.
+func NewInvestigatorProcess(projectPath string, port int, cmd *exec.Cmd) *InvestigatorProcess {
+	return &InvestigatorProcess{
+		ProjectPath: projectPath,
+		Port:        port,
+		BaseURL:     fmt.Sprintf("http://127.0.0.1:%d", port),
+		Cmd:         cmd,
+		StartedAt:   time.Now(),
+	}
 }
 
 // Registry maintains the mapping from repository paths to running investigator
 // processes. It spawns investigators on demand and keeps them alive.
 type Registry struct {
-	mu        sync.RWMutex
-	processes map[string]*InvestigatorProcess // key = abs project path
-	invBinary string
-	httpClient *http.Client
+	mu             sync.RWMutex
+	processes      map[string]*InvestigatorProcess // key = abs project path
+	invBinary      string
+	coordinatorURL string // passed to every spawned investigator via --coordinator-url
+	httpClient     *http.Client
 }
 
 // NewRegistry creates a Registry that will use invBinary to spawn investigators.
-func NewRegistry(invBinary string) *Registry {
-	return &Registry{
-		processes:  make(map[string]*InvestigatorProcess),
-		invBinary:  invBinary,
-		httpClient: &http.Client{Timeout: 5 * time.Second},
+// coordinatorURL is the base URL of this coordinator (e.g. "http://127.0.0.1:7878")
+// and is forwarded to each investigator so it can call back home.
+// It immediately scans the OS process list for investigators that survived a
+// previous coordinator run and reattaches to any that are still healthy.
+func NewRegistry(invBinary, coordinatorURL string) *Registry {
+	r := &Registry{
+		processes:      make(map[string]*InvestigatorProcess),
+		invBinary:      invBinary,
+		coordinatorURL: coordinatorURL,
+		httpClient:     &http.Client{Timeout: 5 * time.Second},
 	}
+
+	// Reattach to any investigators that outlived a previous coordinator crash.
+	r.restoreFromProcessScan()
+
+	return r
 }
 
 // GetOrSpawn returns the running investigator for projectPath, spawning one if
@@ -66,10 +90,15 @@ func (r *Registry) GetOrSpawn(ctx context.Context, projectPath string) (*Investi
 		return proc, nil
 	}
 
-	// Kill stale process if present.
+	// Evict the stale entry. Kill it if we own the process (Cmd != nil);
+	// reattached investigators (Cmd == nil) are simply de-registered.
 	if ok && proc != nil {
-		logf("killing stale investigator for %s (port %d)", projectPath, proc.Port)
-		_ = proc.Cmd.Process.Kill()
+		if proc.Cmd != nil && proc.Cmd.Process != nil {
+			logf("killing stale investigator for %s (port %d)", projectPath, proc.Port)
+			_ = proc.Cmd.Process.Kill()
+		} else {
+			logf("removing stale reattached investigator for %s (port %d)", projectPath, proc.Port)
+		}
 		delete(r.processes, projectPath)
 	}
 
@@ -135,28 +164,29 @@ func (r *Registry) Shutdown() {
 // Internal helpers
 // ──────────────────────────────────────────────────────────────────────────────
 
-// spawn allocates a free port and starts investigator <projectPath> serve --port <port>.
+// spawn allocates a free port and starts investigator <projectPath> serve --port <port>
+// [--coordinator-url <url>].
 func (r *Registry) spawn(ctx context.Context, projectPath string) (*InvestigatorProcess, error) {
 	port, err := allocFreePort()
 	if err != nil {
 		return nil, fmt.Errorf("alloc port: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, r.invBinary, projectPath, "serve", "--port", strconv.Itoa(port))
+	// Build the argument list. Always include --coordinator-url so the
+	// investigator knows where to reach home.
+	args := []string{projectPath, "serve", "--port", strconv.Itoa(port)}
+	if r.coordinatorURL != "" {
+		args = append(args, "--coordinator-url", r.coordinatorURL)
+	}
+
+	cmd := exec.CommandContext(ctx, r.invBinary, args...)
 	// Stdio is intentionally nil — investigator writes its own [sc investigator] logs to stderr.
 	// We don't capture them here; they appear in the coordinator's terminal.
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start %q: %w", r.invBinary, err)
 	}
 
-	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
-	proc := &InvestigatorProcess{
-		ProjectPath: projectPath,
-		Port:        port,
-		BaseURL:     baseURL,
-		Cmd:         cmd,
-		StartedAt:   time.Now(),
-	}
+	proc := NewInvestigatorProcess(projectPath, port, cmd)
 
 	logf("spawned investigator pid=%d port=%d project=%s", cmd.Process.Pid, port, projectPath)
 

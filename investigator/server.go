@@ -17,16 +17,20 @@ import (
 // Server wraps a ProjectInvestigator behind an HTTP API.
 // It owns the http.Server and is responsible for its lifecycle.
 type Server struct {
-	inv  *ProjectInvestigator
-	port int
-	http *http.Server
+	inv            *ProjectInvestigator
+	port           int
+	coordinatorURL string // base URL of the coordinator that spawned us (may be empty)
+	http           *http.Server
 }
 
-// NewServer constructs a Server for the given investigator and port.
+// NewServer constructs a Server for the given investigator, port, and optional
+// coordinator URL. coordinatorURL is the base URL of the coordinator that spawned
+// this investigator (e.g. "http://127.0.0.1:7878"). It is empty when the
+// investigator is run directly by a developer rather than by the coordinator.
 // Routes are registered immediately; the server does not start listening
 // until ListenAndServe is called.
-func NewServer(inv *ProjectInvestigator, port int) *Server {
-	s := &Server{inv: inv, port: port}
+func NewServer(inv *ProjectInvestigator, port int, coordinatorURL string) *Server {
+	s := &Server{inv: inv, port: port, coordinatorURL: coordinatorURL}
 
 	r := chi.NewRouter()
 
@@ -63,13 +67,40 @@ func (s *Server) ListenAndServe() error {
 	if err != nil {
 		return fmt.Errorf("server: listen on %s: %w", s.http.Addr, err)
 	}
+
 	logf("HTTP API listening on http://localhost:%d", s.port)
+
+	// Log coordinator relationship so it is visible in the process's stderr.
+	if s.coordinatorURL != "" {
+		logf("coordinator: %s", s.coordinatorURL)
+	} else {
+		logf("coordinator: none (running standalone)")
+	}
+
 	return s.http.Serve(ln)
 }
 
 // Shutdown gracefully stops the server.
 func (s *Server) Shutdown(ctx context.Context) error {
 	return s.http.Shutdown(ctx)
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// HTTP response types
+// ──────────────────────────────────────────────────────────────────────────────
+
+// investigatorHealthPayload is the body returned by GET /api/v1/health.
+type investigatorHealthPayload struct {
+	OK             bool   `json:"ok"`
+	Repo           string `json:"repo"`
+	Ready          string `json:"ready"`
+	ReadinessLevel int    `json:"readiness_level"`
+	Version        string `json:"version"`
+}
+
+// errorPayload is the body returned for any error response.
+type errorPayload struct {
+	Error string `json:"error"`
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -80,12 +111,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // progress. The readiness_level integer field enables threshold checks.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	st := s.inv.Status()
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":              true,
-		"repo":            st.RepoPath,
-		"ready":           st.ReadinessDesc,
-		"readiness_level": int(st.Readiness),
-		"version":         "v1",
+	writeJSON(w, http.StatusOK, investigatorHealthPayload{
+		OK:             true,
+		Repo:           st.RepoPath,
+		Ready:          st.ReadinessDesc,
+		ReadinessLevel: int(st.Readiness),
+		Version:        "v1",
 	})
 }
 
@@ -236,7 +267,5 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 // writeError sends a JSON error response.
 func writeError(w http.ResponseWriter, status int, err error) {
-	writeJSON(w, status, map[string]string{
-		"error": err.Error(),
-	})
+	writeJSON(w, status, errorPayload{Error: err.Error()})
 }

@@ -20,82 +20,82 @@ const id provider.ProviderID = "filesystem"
 
 // languageByExt maps lowercase file extensions to display language names.
 var languageByExt = map[string]string{
-	".go":    "Go",
-	".py":    "Python",
-	".ts":    "TypeScript",
-	".tsx":   "TypeScript",
-	".js":    "JavaScript",
-	".jsx":   "JavaScript",
-	".mjs":   "JavaScript",
-	".rs":    "Rust",
-	".java":  "Java",
-	".cs":    "C#",
-	".cpp":   "C++",
-	".cc":    "C++",
-	".cxx":   "C++",
-	".c":     "C",
-	".h":     "C/C++",
-	".hpp":   "C++",
-	".rb":    "Ruby",
-	".kt":    "Kotlin",
-	".kts":   "Kotlin",
-	".swift": "Swift",
-	".php":   "PHP",
-	".scala": "Scala",
-	".hs":    "Haskell",
-	".ex":    "Elixir",
-	".exs":   "Elixir",
-	".clj":   "Clojure",
-	".ml":    "OCaml",
-	".mli":   "OCaml",
-	".fs":    "F#",
-	".fsx":   "F#",
-	".lua":   "Lua",
-	".r":     "R",
-	".dart":  "Dart",
-	".md":    "Markdown",
-	".mdx":   "Markdown",
-	".json":  "JSON",
-	".yaml":  "YAML",
-	".yml":   "YAML",
-	".toml":  "TOML",
-	".xml":   "XML",
-	".html":  "HTML",
-	".htm":   "HTML",
-	".css":   "CSS",
-	".scss":  "SCSS",
-	".sass":  "SCSS",
-	".sql":   "SQL",
-	".sh":    "Shell",
-	".bash":  "Shell",
-	".zsh":   "Shell",
-	".fish":  "Shell",
-	".ps1":   "PowerShell",
-	".proto": "Protobuf",
-	".tf":    "Terraform",
+	".go":     "Go",
+	".py":     "Python",
+	".ts":     "TypeScript",
+	".tsx":    "TypeScript",
+	".js":     "JavaScript",
+	".jsx":    "JavaScript",
+	".mjs":    "JavaScript",
+	".rs":     "Rust",
+	".java":   "Java",
+	".cs":     "C#",
+	".cpp":    "C++",
+	".cc":     "C++",
+	".cxx":    "C++",
+	".c":      "C",
+	".h":      "C/C++",
+	".hpp":    "C++",
+	".rb":     "Ruby",
+	".kt":     "Kotlin",
+	".kts":    "Kotlin",
+	".swift":  "Swift",
+	".php":    "PHP",
+	".scala":  "Scala",
+	".hs":     "Haskell",
+	".ex":     "Elixir",
+	".exs":    "Elixir",
+	".clj":    "Clojure",
+	".ml":     "OCaml",
+	".mli":    "OCaml",
+	".fs":     "F#",
+	".fsx":    "F#",
+	".lua":    "Lua",
+	".r":      "R",
+	".dart":   "Dart",
+	".md":     "Markdown",
+	".mdx":    "Markdown",
+	".json":   "JSON",
+	".yaml":   "YAML",
+	".yml":    "YAML",
+	".toml":   "TOML",
+	".xml":    "XML",
+	".html":   "HTML",
+	".htm":    "HTML",
+	".css":    "CSS",
+	".scss":   "SCSS",
+	".sass":   "SCSS",
+	".sql":    "SQL",
+	".sh":     "Shell",
+	".bash":   "Shell",
+	".zsh":    "Shell",
+	".fish":   "Shell",
+	".ps1":    "PowerShell",
+	".proto":  "Protobuf",
+	".tf":     "Terraform",
 	".tfvars": "Terraform",
 }
 
 // buildSystemMarkers maps build-system display names to the files that signal
 // their presence. Files are matched against the repository root only.
 var buildSystemMarkers = map[string][]string{
-	"Go Modules":      {"go.mod"},
-	"npm":             {"package.json"},
-	"Cargo":           {"Cargo.toml"},
-	"Maven":           {"pom.xml"},
-	"Gradle":          {"build.gradle", "build.gradle.kts"},
-	"Make":            {"Makefile", "makefile", "GNUmakefile"},
-	"CMake":           {"CMakeLists.txt"},
-	"Bazel":           {"BUILD", "WORKSPACE", "MODULE.bazel"},
-	"Poetry":          {"pyproject.toml"},
-	"Pipenv":          {"Pipfile"},
-	"pip":             {"requirements.txt", "setup.py", "setup.cfg"},
-	"Bundler":         {"Gemfile"},
-	"Composer":        {"composer.json"},
-	"Mix":             {"mix.exs"},
-	"sbt":             {"build.sbt"},
-	"Docker":          {"Dockerfile"},
-	"Docker Compose":  {"docker-compose.yml", "docker-compose.yaml"},
+	"Go Modules":     {"go.mod"},
+	"npm":            {"package.json"},
+	"Cargo":          {"Cargo.toml"},
+	"Maven":          {"pom.xml"},
+	"Gradle":         {"build.gradle", "build.gradle.kts"},
+	"Make":           {"Makefile", "makefile", "GNUmakefile"},
+	"CMake":          {"CMakeLists.txt"},
+	"Bazel":          {"BUILD", "WORKSPACE", "MODULE.bazel"},
+	"Poetry":         {"pyproject.toml"},
+	"Pipenv":         {"Pipfile"},
+	"pip":            {"requirements.txt", "setup.py", "setup.cfg"},
+	"Bundler":        {"Gemfile"},
+	"Composer":       {"composer.json"},
+	"Mix":            {"mix.exs"},
+	"sbt":            {"build.sbt"},
+	"Docker":         {"Dockerfile"},
+	"Docker Compose": {"docker-compose.yml", "docker-compose.yaml"},
 }
 
 // testSystemMarkers maps test-framework names to indicator files/patterns at
@@ -138,9 +138,18 @@ type Provider struct {
 	ready    bool
 }
 
-// New returns a new, unattached filesystem Provider.
-func New() *Provider {
-	return &Provider{}
+// NewFilesystemProvider creates a FilesystemProvider that is fully initialised
+// and ready to answer queries for the given repository root. An error is
+// returned when repoPath does not exist or is not a directory.
+func NewFilesystemProvider(_ context.Context, repoPath string) (*Provider, error) {
+	info, err := os.Stat(repoPath)
+	if err != nil {
+		return nil, fmt.Errorf("filesystem provider: cannot stat %q: %w", repoPath, err)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("filesystem provider: %q is not a directory", repoPath)
+	}
+	return &Provider{repoPath: repoPath, ready: true}, nil
 }
 
 // Capabilities satisfies provider.Provider.
@@ -150,20 +159,6 @@ func (p *Provider) Capabilities() provider.ProviderCapabilities {
 		DisplayName: "Filesystem Provider",
 		Roles:       []provider.ProviderRole{provider.RoleFilesystem},
 	}
-}
-
-// Attach validates the repo path and marks the provider ready.
-func (p *Provider) Attach(_ context.Context, repoPath string) error {
-	info, err := os.Stat(repoPath)
-	if err != nil {
-		return fmt.Errorf("filesystem provider: cannot stat %q: %w", repoPath, err)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("filesystem provider: %q is not a directory", repoPath)
-	}
-	p.repoPath = repoPath
-	p.ready = true
-	return nil
 }
 
 // Ready reports whether the provider is attached and usable.

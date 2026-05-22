@@ -3,7 +3,12 @@
 // compliance. It is a first-class product concern, not a testing afterthought.
 package eval
 
-import "time"
+import (
+	"fmt"
+	"io"
+	"strings"
+	"time"
+)
 
 // SuiteID identifies a named evaluation suite.
 type SuiteID string
@@ -106,4 +111,72 @@ type EvalRun struct {
 type EvalReport struct {
 	Run     EvalRun
 	Verdict string // "PASSED", "FAILED", "PARTIAL"
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Factories
+// ──────────────────────────────────────────────────────────────────────────────
+
+// newEvalResult constructs an EvalResult pre-populated with the scenario's
+// identity fields and Passed = true. Check methods call this instead of
+// writing the same struct literal six times.
+func newEvalResult(sc EvalScenario) EvalResult {
+	return EvalResult{
+		ScenarioID:   sc.ID,
+		ScenarioName: sc.Name,
+		Passed:       true,
+	}
+}
+
+// newEvalRun constructs a fresh EvalRun with a unique ID and the current time
+// as StartedAt. FinishedAt and Summary are filled in by Runner.Run once all
+// scenarios have executed.
+func newEvalRun(suite SuiteID, repoPath string) *EvalRun {
+	return &EvalRun{
+		ID:        fmt.Sprintf("eval-%s-%d", suite, time.Now().UnixMilli()),
+		Suite:     suite,
+		RepoPath:  repoPath,
+		StartedAt: time.Now(),
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// EvalRun methods
+// ──────────────────────────────────────────────────────────────────────────────
+
+// PrintReport writes a human-readable Markdown report to w.
+func (r *EvalRun) PrintReport(w io.Writer) {
+	verdict := "PASSED"
+	if r.Summary.Failed > 0 {
+		verdict = "FAILED"
+	}
+
+	fmt.Fprintf(w, "# Eval Report: %s\n\n", r.Suite)
+	fmt.Fprintf(w, "**Verdict:** %s  \n", verdict)
+	fmt.Fprintf(w, "**Score:** %d/%d scenarios passed (%.0f%%)\n\n",
+		r.Summary.Passed, r.Summary.Total, r.Summary.Score*100)
+	fmt.Fprintf(w, "| Scenario | Result | Details |\n")
+	fmt.Fprintf(w, "|----------|--------|--------|\n")
+
+	for _, res := range r.Results {
+		icon := "✓"
+		if !res.Passed {
+			icon = "✗"
+		}
+
+		var parts []string
+		for _, m := range res.Metrics {
+			parts = append(parts, m.Detail)
+		}
+		parts = append(parts, res.Notes...)
+		details := strings.Join(parts, "; ")
+
+		resultLabel := map[bool]string{true: "passed", false: "failed"}[res.Passed]
+		fmt.Fprintf(w, "| %s %s | %s | %s |\n", icon, res.ScenarioName, resultLabel, details)
+	}
+
+	fmt.Fprintf(w, "\n_Run ID: %s · %s → %s_\n",
+		r.ID,
+		r.StartedAt.Format("15:04:05"),
+		r.FinishedAt.Format("15:04:05"))
 }

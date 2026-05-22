@@ -105,17 +105,13 @@ func NewProjectInvestigator(ctx context.Context, repoPath string) (*ProjectInves
 
 	cfg := config.LoadProject(absPath)
 
-	fsP := filesystem.New()
-	if err := fsP.Attach(ctx, absPath); err != nil {
-		return nil, fmt.Errorf("investigator: attaching filesystem provider: %w", err)
+	fsP, err := filesystem.NewFilesystemProvider(ctx, absPath)
+	if err != nil {
+		return nil, fmt.Errorf("investigator: filesystem provider: %w", err)
 	}
 
-	vcsP := vcs.New()
-	vcsErr := vcsP.Attach(ctx, absPath)
 	// VCS provider failure is not fatal — we can operate without git.
-	if vcsErr != nil {
-		vcsP = nil
-	}
+	vcsP, _ := vcs.NewVCSProvider(ctx, absPath)
 
 	store, err := artifacts.Open(absPath)
 	if err != nil {
@@ -125,9 +121,22 @@ func NewProjectInvestigator(ctx context.Context, repoPath string) (*ProjectInves
 
 	// Language provider: try to load the Go import graph. Non-fatal on failure —
 	// the investigator falls back to heuristic-only scoring.
-	langP := goprovider.New()
-	if attachErr := langP.Attach(ctx, absPath); attachErr != nil || !langP.Ready() {
+	langP, langErr := goprovider.NewGoLanguageProvider(ctx, absPath)
+	if langErr != nil || !langP.Ready() {
 		langP = nil
+	}
+
+	// Require at least one meaningful provider beyond the filesystem layer.
+	// A VCS-less, language-less directory offers too little value to justify
+	// running a daemon. Fail fast so the coordinator surfaces a clear error
+	// rather than serving empty responses forever.
+	if vcsP == nil && langP == nil {
+		return nil, fmt.Errorf(
+			"investigator: %q has no supported providers — "+
+				"not a git repository and no recognized language project "+
+				"(currently supported languages: Go)",
+			absPath,
+		)
 	}
 
 	// Call logger: non-fatal.
