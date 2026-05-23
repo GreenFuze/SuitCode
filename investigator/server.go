@@ -109,7 +109,7 @@ type errorPayload struct {
 
 // handleHealth returns current readiness so the coordinator can poll warmup
 // progress. The readiness_level integer field enables threshold checks.
-func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	st := s.inv.Status()
 	writeJSON(w, http.StatusOK, investigatorHealthPayload{
 		OK:             true,

@@ -87,7 +87,7 @@ func buildTopLevelStructure(listing *provider.ProviderResult[provider.Filesystem
 		seen[top] = true
 
 		isDir := len(parts) > 1
-		notes := topLevelNotes(top, f, listing)
+		notes := topLevelNotes(top, f)
 		entries = append(entries, cfeatures.DirectoryEntry{
 			RelPath:  top,
 			IsDir:    isDir,
@@ -99,7 +99,7 @@ func buildTopLevelStructure(listing *provider.ProviderResult[provider.Filesystem
 	return entries
 }
 
-func topLevelNotes(name string, f provider.FilesystemFile, listing *provider.ProviderResult[provider.FilesystemListing]) string {
+func topLevelNotes(name string, f provider.FilesystemFile) string {
 	switch strings.ToLower(name) {
 	case "cmd":
 		return "command entry points"
@@ -154,7 +154,7 @@ func buildNotableDirectories(listing *provider.ProviderResult[provider.Filesyste
 		notable = append(notable, cfeatures.DirectoryEntry{
 			RelPath: top,
 			IsDir:   true,
-			Notes:   topLevelNotes(top, f, listing),
+			Notes:   topLevelNotes(top, f),
 		})
 		if len(notable) >= 12 {
 			break

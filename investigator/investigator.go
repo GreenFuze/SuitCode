@@ -123,6 +123,11 @@ func NewProjectInvestigator(ctx context.Context, repoPath string) (*ProjectInves
 	// the investigator falls back to heuristic-only scoring.
 	langP, langErr := goprovider.NewGoLanguageProvider(ctx, absPath)
 	if langErr != nil || !langP.Ready() {
+		// If construction succeeded but the provider is not ready, release it
+		// before discarding — it may own goroutines or file handles.
+		if langErr == nil {
+			_ = langP.Close()
+		}
 		langP = nil
 	}
 
@@ -131,6 +136,7 @@ func NewProjectInvestigator(ctx context.Context, repoPath string) (*ProjectInves
 	// running a daemon. Fail fast so the coordinator surfaces a clear error
 	// rather than serving empty responses forever.
 	if vcsP == nil && langP == nil {
+		_ = fsP.Close()
 		return nil, fmt.Errorf(
 			"investigator: %q has no supported providers — "+
 				"not a git repository and no recognized language project "+

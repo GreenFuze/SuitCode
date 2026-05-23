@@ -5,6 +5,7 @@ package artifacts
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"time"
@@ -115,7 +116,7 @@ func (s *Store) LoadRunMetrics(runID features.RunID) (*features.FeatureMetrics, 
 
 	var metricsJSON string
 	if err := row.Scan(&metricsJSON); err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("artifacts store: run %s not found", runID)
 		}
 		return nil, fmt.Errorf("artifacts store: loading run %s: %w", runID, err)
@@ -175,7 +176,7 @@ func (s *Store) LoadEvalRun(id string) (*EvalRunRecord, error) {
 	var r EvalRunRecord
 	var startedAt, finishedAt string
 	if err := row.Scan(&r.ID, &r.Suite, &r.RepoPath, &startedAt, &finishedAt, &r.ResultsJSON, &r.SummaryJSON); err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("artifacts store: eval run %s not found", id)
 		}
 		return nil, fmt.Errorf("artifacts store: loading eval run %s: %w", id, err)

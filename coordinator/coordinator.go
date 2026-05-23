@@ -115,7 +115,7 @@ type errorPayload struct {
 // ──────────────────────────────────────────────────────────────────────────────
 
 // handleHealth reports coordinator status.
-func (c *Coordinator) handleHealth(w http.ResponseWriter, r *http.Request) {
+func (c *Coordinator) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	procs := c.registry.List()
 	writeJSON(w, http.StatusOK, coordinatorHealthPayload{
 		OK:       true,
@@ -125,7 +125,7 @@ func (c *Coordinator) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleProjects lists all active investigator processes.
-func (c *Coordinator) handleProjects(w http.ResponseWriter, r *http.Request) {
+func (c *Coordinator) handleProjects(w http.ResponseWriter, _ *http.Request) {
 	procs := c.registry.List()
 
 	infos := make([]projectInfo, 0, len(procs))
