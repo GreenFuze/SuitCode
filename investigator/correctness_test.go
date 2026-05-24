@@ -243,19 +243,16 @@ func TestGetImports_GoplsPackage(t *testing.T) {
 	skipIfShort(t, "requires go/packages load")
 
 	inv := sharedInv(t)
-	if inv.langProvider == nil {
-		t.Skip("no language provider available")
+	if !inv.multiProvider.GoReady() {
+		t.Skip("no Go language provider available")
 	}
 
 	ctx := context.Background()
 	absPath := filepath.Join(inv.repoPath, "core", "provider", "language", "go", "provider.go")
 
-	result, err := inv.langProvider.GetImports(ctx, absPath)
+	result, err := inv.multiProvider.GetImports(ctx, absPath)
 	if err != nil {
 		t.Fatalf("GetImports: %v", err)
-	}
-	if !inv.langProvider.Ready() {
-		t.Skip("language provider not ready")
 	}
 
 	var hasProviderImport bool
@@ -277,19 +274,16 @@ func TestFileImporters_CoreProvider(t *testing.T) {
 	skipIfShort(t, "requires go/packages load for reverse import index")
 
 	inv := sharedInv(t)
-	if inv.langProvider == nil {
-		t.Skip("no language provider available")
+	if !inv.multiProvider.GoReady() {
+		t.Skip("no Go language provider available")
 	}
 
 	ctx := context.Background()
 	absPath := filepath.Join(inv.repoPath, "core", "provider", "roles.go")
 
-	result, err := inv.langProvider.FileImporters(ctx, absPath)
+	result, err := inv.multiProvider.FileImporters(ctx, absPath)
 	if err != nil {
 		t.Fatalf("FileImporters: %v", err)
-	}
-	if !inv.langProvider.Ready() {
-		t.Skip("language provider not ready")
 	}
 
 	t.Logf("importers of core/provider: %d files", len(result.Data))
@@ -324,19 +318,16 @@ func TestFileImports_EvalPackage(t *testing.T) {
 	skipIfShort(t, "requires go/packages load")
 
 	inv := sharedInv(t)
-	if inv.langProvider == nil {
-		t.Skip("no language provider available")
+	if !inv.multiProvider.GoReady() {
+		t.Skip("no Go language provider available")
 	}
 
 	ctx := context.Background()
 	absPath := filepath.Join(inv.repoPath, "investigator", "eval", "runner.go")
 
-	result, err := inv.langProvider.FileImports(ctx, absPath)
+	result, err := inv.multiProvider.FileImports(ctx, absPath)
 	if err != nil {
 		t.Fatalf("FileImports: %v", err)
-	}
-	if !inv.langProvider.Ready() {
-		t.Skip("language provider not ready")
 	}
 
 	t.Logf("files imported by investigator/eval: %d", len(result.Data))
@@ -364,11 +355,11 @@ func TestGetFileSymbols_InvestigatorFile(t *testing.T) {
 	ctx := context.Background()
 
 	deadline := time.Now().Add(30 * time.Second)
-	for inv.langProvider != nil && !inv.langProvider.GoplsReady() && time.Now().Before(deadline) {
+	for !inv.multiProvider.GoplsReady() && time.Now().Before(deadline) {
 		time.Sleep(200 * time.Millisecond)
 	}
 
-	if inv.langProvider == nil || !inv.langProvider.GoplsReady() {
+	if !inv.multiProvider.GoplsReady() {
 		t.Skip("gopls not ready after 30s — skipping symbol test")
 	}
 
