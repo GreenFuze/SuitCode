@@ -30,11 +30,11 @@ type MultiLangProvider struct {
 	providers []provider.ImportGraphProvider
 }
 
-// New creates a MultiLangProvider wrapping the given providers.
+// NewMultiLangProvider creates a MultiLangProvider wrapping the given providers.
 // Nil entries — including typed-nil pointers wrapped in an interface — are
 // silently discarded. Providers should already be in a Ready state when passed
 // here; readiness is not re-checked per call.
-func New(providers ...provider.ImportGraphProvider) *MultiLangProvider {
+func NewMultiLangProvider(providers ...provider.ImportGraphProvider) *MultiLangProvider {
 	var valid []provider.ImportGraphProvider
 	for _, p := range providers {
 		if !isNilProvider(p) {

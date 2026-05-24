@@ -175,7 +175,7 @@ func NewProjectInvestigator(ctx context.Context, repoPath string) (*ProjectInves
 	// Build the composite language provider from all ready individual providers.
 	// The order in which providers are passed does not affect correctness; each
 	// provider only returns results for files it understands.
-	multiP := multiprovider.New(langP, jsP, pyP)
+	multiP := multiprovider.NewMultiLangProvider(langP, jsP, pyP)
 
 	// Call logger: non-fatal.
 	clog, _ := calllog.New(absPath)
