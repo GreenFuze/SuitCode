@@ -33,31 +33,46 @@ SuitCode never returns a result it can't back with a verified signal. If the imp
 
 **Requires:** Go 1.21+
 
+### Without tray icon
+
 ```sh
-go install github.com/GreenFuze/SuitCode/suitcode@latest
-go install github.com/GreenFuze/SuitCode/coordinator@latest
-go install github.com/GreenFuze/SuitCode/investigator@latest
+# macOS / Linux
+curl -sSfL https://raw.githubusercontent.com/GreenFuze/SuitCode/main/install.sh | sh
+
+# Windows (Command Prompt)
+curl -sSfL https://raw.githubusercontent.com/GreenFuze/SuitCode/main/install.bat -o install.bat && install.bat && del install.bat
 ```
 
-That's it. All three binaries land in `$GOPATH/bin` (usually `~/go/bin`). The coordinator auto-starts on first use — no config, no daemon management.
-
-**Desktop tray** (optional — shows live investigator status in your menu bar):
+### With desktop tray icon
 
 ```sh
-# macOS / Windows — no extra dependencies
-go install -tags systray github.com/GreenFuze/SuitCode/tray@latest
+# macOS / Linux
+curl -sSfL https://raw.githubusercontent.com/GreenFuze/SuitCode/main/install.sh | sh -s -- --tray
 
-# Linux — AppIndicator first
+# Linux — install AppIndicator first, then run the line above
 sudo apt install libayatana-appindicator3-dev   # Debian/Ubuntu
-go install -tags systray github.com/GreenFuze/SuitCode/tray@latest
+sudo dnf install libayatana-appindicator3-devel # Fedora
+
+# Windows (Command Prompt)
+curl -sSfL https://raw.githubusercontent.com/GreenFuze/SuitCode/main/install.bat -o install.bat && install.bat --tray && del install.bat
 ```
+
+All binaries land in `$GOPATH/bin` (usually `~/go/bin` or `%USERPROFILE%\go\bin`).  
+The coordinator auto-starts on first use — no config, no daemon management.
 
 **CI / headless servers** — CGo-free, no tray:
 
 ```sh
-CGO_ENABLED=0 go install github.com/GreenFuze/SuitCode/suitcode@latest
-CGO_ENABLED=0 go install github.com/GreenFuze/SuitCode/coordinator@latest
-CGO_ENABLED=0 go install github.com/GreenFuze/SuitCode/investigator@latest
+curl -sSfL https://raw.githubusercontent.com/GreenFuze/SuitCode/main/install.sh | sh -s -- --ci
+```
+
+**Install scripts are also in the repo root** if you prefer to clone first:
+
+```sh
+./install.sh           # macOS / Linux, no tray
+./install.sh --tray    # macOS / Linux, with tray
+install.bat            # Windows, no tray
+install.bat --tray     # Windows, with tray
 ```
 
 ---
