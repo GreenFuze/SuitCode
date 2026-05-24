@@ -6,6 +6,8 @@ package goprovider
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -45,15 +47,133 @@ type packageIndex struct {
 	reverseImports map[string][]string
 }
 
-// loadPackageGraph loads the full import graph for the Go module(s) rooted at
-// repoPath using go/packages. Only packages whose directory is under repoPath
-// are indexed — stdlib and external dependencies are excluded.
+// goSkipDirs are directories that should not be traversed when searching for
+// go.mod files. Mirrors the skip lists used by the JS and Python providers
+// plus the worktree guard.
+var goSkipDirs = map[string]bool{
+	".git":          true,
+	".claude":       true, // Claude Code worktrees — must not be indexed
+	"node_modules":  true,
+	"vendor":        true,
+	"__pycache__":   true,
+	".venv":         true,
+	"venv":          true,
+	"env":           true,
+	".env":          true,
+	"dist":          true,
+	"build":         true,
+	".next":         true,
+	".nuxt":         true,
+	".turbo":        true,
+	".cache":        true,
+	"coverage":      true,
+	"testdata":      true,
+	".pytest_cache": true,
+	"site-packages": true,
+}
+
+// findModuleRoots walks repoPath and returns the directory path of every
+// go.mod file found, in lexicographic order.
 //
-// Failure to load (e.g. go binary not found, no go.mod) returns a non-nil
-// error. Individual package-level errors (e.g. a single file with a syntax
-// error) are returned as Limitations, not as a hard error, so the caller can
-// still use a partial index.
+// If no go.mod is found anywhere under repoPath (e.g. the user opened a
+// loose directory of Go snippets) the function returns []string{repoPath}
+// so the caller can still attempt a best-effort load from the root — this
+// preserves the original single-module behaviour.
+func findModuleRoots(repoPath string) []string {
+	var roots []string
+
+	_ = filepath.WalkDir(repoPath, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil // skip unreadable entries
+		}
+		if d.IsDir() {
+			if goSkipDirs[d.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.Name() == "go.mod" {
+			roots = append(roots, filepath.Dir(path))
+		}
+		return nil
+	})
+
+	if len(roots) == 0 {
+		// No go.mod found: fall back to repo root so callers still get a
+		// meaningful (though likely empty) package load attempt.
+		return []string{repoPath}
+	}
+
+	sort.Strings(roots)
+	return roots
+}
+
+// loadPackageGraph loads the full import graph for all Go module(s) found
+// under repoPath using go/packages.
+//
+// For polyglot or multi-module repos (e.g. a monorepo where the Go backend
+// lives under server/ with its own go.mod, or a repo with many plugin
+// modules), the function discovers every go.mod via findModuleRoots, runs a
+// separate go/packages.Load for each module root, and merges the results into
+// a single unified packageIndex.
+//
+// Cross-module import edges are resolved correctly: the reverse-import map is
+// rebuilt from scratch after all module indices are merged, so package A
+// importing package B from a sibling module is captured in both directions.
+//
+// Individual module load failures are returned as Limitations, not as a hard
+// error, so the caller can still use whatever partial index was built. A hard
+// error is returned only when every discovered module fails to load.
 func loadPackageGraph(ctx context.Context, repoPath string) (*packageIndex, []provider.Limitation, error) {
+	moduleRoots := findModuleRoots(repoPath)
+
+	// Accumulated merged index.
+	merged := &packageIndex{
+		byPkgPath:      make(map[string]*packageNode),
+		byFile:         make(map[string]*packageNode),
+		reverseImports: make(map[string][]string),
+	}
+
+	var allLimitations []provider.Limitation
+	successCount := 0
+
+	for _, root := range moduleRoots {
+		idx, lims, err := loadSingleModuleGraph(ctx, root, repoPath)
+		allLimitations = append(allLimitations, lims...)
+
+		if err != nil {
+			allLimitations = append(allLimitations, provider.Limitation{
+				Kind:    "go_packages_load_failed",
+				Message: fmt.Sprintf("module at %s: %v", root, err),
+				Scope:   root,
+			})
+			continue
+		}
+
+		successCount++
+		mergePackageIndex(merged, idx)
+	}
+
+	if successCount == 0 {
+		return nil, allLimitations, fmt.Errorf("all %d Go module(s) failed to load", len(moduleRoots))
+	}
+
+	// Rebuild reverseImports after merging all modules so that cross-module
+	// edges (e.g. a plugin importing the server module) are captured correctly.
+	merged.reverseImports = buildReverseImports(merged.byPkgPath)
+
+	return merged, allLimitations, nil
+}
+
+// loadSingleModuleGraph loads the package graph for one Go module rooted at
+// moduleDir. Only packages whose directory is under repoPath are indexed;
+// stdlib and external dependencies are excluded.
+//
+// Failure to load (e.g. go binary not found) returns a non-nil error.
+// Individual package-level errors (e.g. a single file with a syntax error)
+// are returned as Limitations, not a hard error, so the caller can use a
+// partial index.
+func loadSingleModuleGraph(ctx context.Context, moduleDir, repoPath string) (*packageIndex, []provider.Limitation, error) {
 	cfg := &packages.Config{
 		Context: ctx,
 		// NeedName: pkg.PkgPath is set.
@@ -63,7 +183,7 @@ func loadPackageGraph(ctx context.Context, repoPath string) (*packageIndex, []pr
 		// GoFiles for all module packages. NeedDeps would additionally load
 		// stdlib and external packages, which we neither need nor want.
 		Mode: packages.NeedName | packages.NeedFiles | packages.NeedImports,
-		Dir:  repoPath,
+		Dir:  moduleDir,
 	}
 
 	pkgs, err := packages.Load(cfg, "./...")
@@ -79,15 +199,15 @@ func loadPackageGraph(ctx context.Context, repoPath string) (*packageIndex, []pr
 
 	var limitations []provider.Limitation
 
-	// ── First pass: build nodes for every module-local package ───────────────
+	// ── Build nodes for every repo-local package ──────────────────────────────
 	for _, pkg := range pkgs {
 		// Skip packages whose source is not under the repo root (e.g. stubs
-		// injected by the go tool for missing dependencies).
+		// injected by the go tool for missing dependencies, or stdlib).
 		if pkg.PkgPath == "" || !strings.HasPrefix(pkg.Dir, repoPath) {
 			continue
 		}
 
-		// Collect any package-level errors as Limitations.
+		// Collect any package-level errors as Limitations (non-fatal).
 		for _, pkgErr := range pkg.Errors {
 			limitations = append(limitations, provider.Limitation{
 				Kind:    "package_load_error",
@@ -120,23 +240,62 @@ func loadPackageGraph(ctx context.Context, repoPath string) (*packageIndex, []pr
 		}
 	}
 
-	// ── Second pass: build reverse import index ───────────────────────────────
-	//
-	// For each node N and each import path I in N.ImportIDs, record that N
-	// imports I (i.e. I is imported by N). This lets importerFiles() answer
-	// "who imports package P?" in O(1).
-	for _, node := range idx.byPkgPath {
+	return idx, limitations, nil
+}
+
+// mergePackageIndex copies all entries from src into dst. When a package
+// path or file path already exists in dst (from an earlier module load), the
+// dst entry is preserved. The reverseImports map is intentionally left empty
+// in dst — it is rebuilt once after all modules are merged via
+// buildReverseImports.
+func mergePackageIndex(dst, src *packageIndex) {
+	for k, v := range src.byPkgPath {
+		if _, exists := dst.byPkgPath[k]; !exists {
+			dst.byPkgPath[k] = v
+		}
+	}
+	for k, v := range src.byFile {
+		if _, exists := dst.byFile[k]; !exists {
+			dst.byFile[k] = v
+		}
+	}
+}
+
+// buildReverseImports constructs the reverse-import index from scratch given
+// the fully-merged byPkgPath map. For every package N and every import path I
+// in N.ImportIDs, it records that N imports I (i.e. I is imported by N).
+// Cross-module edges are handled automatically because Go import path strings
+// are canonical across modules.
+func buildReverseImports(byPkgPath map[string]*packageNode) map[string][]string {
+	rev := make(map[string][]string, len(byPkgPath))
+
+	for _, node := range byPkgPath {
 		for _, importID := range node.ImportIDs {
-			idx.reverseImports[importID] = append(idx.reverseImports[importID], node.PkgPath)
+			rev[importID] = append(rev[importID], node.PkgPath)
 		}
 	}
 
-	// Sort each reverse-import list for determinism.
-	for k := range idx.reverseImports {
-		sort.Strings(idx.reverseImports[k])
+	for k := range rev {
+		sort.Strings(rev[k])
+		rev[k] = dedupStrings(rev[k])
 	}
 
-	return idx, limitations, nil
+	return rev
+}
+
+// dedupStrings returns a deduplicated copy of a sorted string slice. The
+// input must already be sorted. Returns nil for empty input.
+func dedupStrings(ss []string) []string {
+	if len(ss) == 0 {
+		return nil
+	}
+	out := ss[:1]
+	for i := 1; i < len(ss); i++ {
+		if ss[i] != ss[i-1] {
+			out = append(out, ss[i])
+		}
+	}
+	return out
 }
 
 // fileToNode returns the packageNode that owns absFilePath, or nil when the
@@ -162,7 +321,7 @@ func (idx *packageIndex) importedFiles(absFilePath string) []string {
 	for _, importID := range node.ImportIDs {
 		imported := idx.byPkgPath[importID]
 		if imported == nil {
-			// stdlib or external dep — not in our module-local index.
+			// stdlib or external dep — not in our repo-local index.
 			continue
 		}
 		for _, f := range imported.GoFiles {

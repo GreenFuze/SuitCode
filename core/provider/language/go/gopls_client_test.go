@@ -116,11 +116,12 @@ func TestGoplsClient_DocumentSymbols_KnownFile(t *testing.T) {
 
 	expected := []string{
 		"GoLanguageProvider",
-		"New",
-		"Attach",
+		"NewGoLanguageProvider",
 		"Ready",
 		"GoplsReady",
 		"Close",
+		"FileImports",
+		"FileImporters",
 	}
 	for _, want := range expected {
 		if !symbolPresent(names, want) {

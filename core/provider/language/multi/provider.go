@@ -10,6 +10,7 @@ package multiprovider
 
 import (
 	"context"
+	"reflect"
 	"sort"
 	"time"
 
@@ -30,16 +31,35 @@ type MultiLangProvider struct {
 }
 
 // New creates a MultiLangProvider wrapping the given providers.
-// Nil entries are silently discarded. Providers should already be in a Ready
-// state when passed here; ReadyState is not re-checked per call.
+// Nil entries — including typed-nil pointers wrapped in an interface — are
+// silently discarded. Providers should already be in a Ready state when passed
+// here; readiness is not re-checked per call.
 func New(providers ...provider.ImportGraphProvider) *MultiLangProvider {
 	var valid []provider.ImportGraphProvider
 	for _, p := range providers {
-		if p != nil {
+		if !isNilProvider(p) {
 			valid = append(valid, p)
 		}
 	}
 	return &MultiLangProvider{providers: valid}
+}
+
+// isNilProvider reports whether p is nil or is an interface holding a nil
+// pointer. Go's interface nil check (p == nil) only catches the case where
+// both the type and value parts of the interface are nil. When a typed nil
+// (e.g. (*JSLanguageProvider)(nil)) is assigned to an interface variable, the
+// interface itself is non-nil but the underlying pointer is nil — calling any
+// method on it will panic. Reflection handles both cases correctly.
+func isNilProvider(p provider.ImportGraphProvider) bool {
+	if p == nil {
+		return true
+	}
+	v := reflect.ValueOf(p)
+	switch v.Kind() {
+	case reflect.Ptr, reflect.Chan, reflect.Func, reflect.Map, reflect.Slice, reflect.Interface:
+		return v.IsNil()
+	}
+	return false
 }
 
 // Len returns the number of underlying providers.

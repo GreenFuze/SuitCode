@@ -127,8 +127,7 @@ func GoProviderSymbolScenarios(_ string) []EvalScenario {
 				SeedFiles: []string{"core/provider/language/go/provider.go"},
 				ExpectedSymbols: []string{
 					"GoLanguageProvider",
-					"New",
-					"Attach",
+					"NewGoLanguageProvider",
 					"Ready",
 					"GoplsReady",
 					"Close",

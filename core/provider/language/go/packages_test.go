@@ -2,6 +2,7 @@ package goprovider_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -158,6 +159,93 @@ func TestPackageIndex_unknownFile(t *testing.T) {
 	}
 }
 
+// TestFindModuleRoots_SingleModule verifies that a standard single-module repo
+// (go.mod at the root) returns only the root directory.
+func TestFindModuleRoots_SingleModule(t *testing.T) {
+	root := repoRoot(t)
+	roots := goprovider.FindModuleRootsForTest(root)
+
+	if len(roots) != 1 {
+		t.Fatalf("expected 1 module root, got %d: %v", len(roots), roots)
+	}
+	if roots[0] != root {
+		t.Errorf("expected root %q, got %q", root, roots[0])
+	}
+}
+
+// TestFindModuleRoots_MultiModule verifies that a repo with multiple go.mod
+// files (one per module) correctly discovers all module roots.
+func TestFindModuleRoots_MultiModule(t *testing.T) {
+	// Build a temp directory tree that mimics a multi-module monorepo:
+	//   <tmp>/
+	//     server/go.mod
+	//     server/plugins/plugin1/go.mod
+	//     server/plugins/plugin2/go.mod
+	//     frontend/         (no go.mod — JS-only)
+	//     .git/go.mod       (must be skipped)
+	//     .claude/go.mod    (must be skipped)
+
+	tmp := t.TempDir()
+
+	mkGoMod := func(dir, modulePath string) {
+		t.Helper()
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q): %v", dir, err)
+		}
+		content := fmt.Sprintf("module %s\n\ngo 1.21\n", modulePath)
+		if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(content), 0o644); err != nil {
+			t.Fatalf("WriteFile go.mod: %v", err)
+		}
+	}
+
+	mkGoMod(filepath.Join(tmp, "server"), "example.com/myapp/server")
+	mkGoMod(filepath.Join(tmp, "server", "plugins", "plugin1"), "example.com/myapp/plugin1")
+	mkGoMod(filepath.Join(tmp, "server", "plugins", "plugin2"), "example.com/myapp/plugin2")
+
+	// These should be skipped:
+	mkGoMod(filepath.Join(tmp, ".git"), "example.com/myapp/should-not-appear")
+	mkGoMod(filepath.Join(tmp, ".claude"), "example.com/myapp/also-should-not-appear")
+
+	// frontend is a plain directory with no go.mod — should not contribute.
+	if err := os.MkdirAll(filepath.Join(tmp, "frontend", "src"), 0o755); err != nil {
+		t.Fatalf("MkdirAll frontend: %v", err)
+	}
+
+	roots := goprovider.FindModuleRootsForTest(tmp)
+
+	if len(roots) != 3 {
+		t.Fatalf("expected 3 module roots, got %d: %v", len(roots), roots)
+	}
+
+	want := []string{
+		filepath.Join(tmp, "server"),
+		filepath.Join(tmp, "server", "plugins", "plugin1"),
+		filepath.Join(tmp, "server", "plugins", "plugin2"),
+	}
+	for i, w := range want {
+		if roots[i] != w {
+			t.Errorf("roots[%d]: want %q, got %q", i, w, roots[i])
+		}
+	}
+}
+
+// TestFindModuleRoots_NoModule verifies that a directory tree with no go.mod
+// returns the repo root itself (fallback behaviour).
+func TestFindModuleRoots_NoModule(t *testing.T) {
+	tmp := t.TempDir()
+
+	// Create a plausible-looking directory tree but no go.mod.
+	if err := os.MkdirAll(filepath.Join(tmp, "src", "main"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	roots := goprovider.FindModuleRootsForTest(tmp)
+
+	if len(roots) != 1 || roots[0] != tmp {
+		t.Errorf("expected fallback to repo root %q, got %v", tmp, roots)
+	}
+}
+
 // TestPackageIndex_Determinism verifies that repeated calls to importedFiles
 // and importerFiles produce the same result.
 func TestPackageIndex_Determinism(t *testing.T) {
@@ -177,4 +265,48 @@ func TestPackageIndex_Determinism(t *testing.T) {
 			t.Errorf("determinism failure at index %d: %q != %q", i, first[i], second[i])
 		}
 	}
+}
+
+// TestLoadPackageGraph_MultiModuleMonorepo is an optional integration test that
+// exercises the multi-module code path against the MGA repository when it is
+// available on the local machine. It is skipped in CI environments where the
+// MGA source tree is not present.
+func TestLoadPackageGraph_MultiModuleMonorepo(t *testing.T) {
+	const mgaPath = `C:\src\github.com\GreenFuze\MyGamesAnywhere`
+
+	info, err := os.Stat(mgaPath)
+	if err != nil || !info.IsDir() {
+		t.Skipf("MGA repo not found at %s — skipping integration test", mgaPath)
+	}
+
+	// ── Part 1: verify module discovery ──────────────────────────────────────
+	roots := goprovider.FindModuleRootsForTest(mgaPath)
+
+	// MGA has server/go.mod + several plugin go.mod files.
+	if len(roots) < 2 {
+		t.Fatalf("expected at least 2 module roots in MGA, got %d: %v", len(roots), roots)
+	}
+	t.Logf("found %d module roots: %v", len(roots), roots)
+
+	// ── Part 2: verify the package graph loads without a hard error ───────────
+	idx, lims, err := goprovider.LoadPackageGraphForTest(context.Background(), mgaPath)
+	if err != nil {
+		t.Fatalf("loadPackageGraph on MGA: %v", err)
+	}
+	for _, lim := range lims {
+		t.Logf("limitation [%s] (%s): %s", lim.Kind, lim.Scope, lim.Message)
+	}
+
+	pkgs := idx.PkgPathCount()
+	files := idx.FileCount()
+	edges := idx.ReverseImportCount()
+
+	if pkgs == 0 {
+		t.Error("expected at least one Go package to be indexed")
+	}
+	if files == 0 {
+		t.Error("expected at least one .go file to be indexed")
+	}
+
+	t.Logf("packages=%d files=%d reverseEdges=%d", pkgs, files, edges)
 }

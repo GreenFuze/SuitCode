@@ -21,6 +21,11 @@ type PackageIndexForTest struct {
 	idx *packageIndex
 }
 
+// FindModuleRootsForTest exposes findModuleRoots for unit tests.
+func FindModuleRootsForTest(repoPath string) []string {
+	return findModuleRoots(repoPath)
+}
+
 // LoadPackageGraphForTest is the exported entry point for tests.
 func LoadPackageGraphForTest(ctx context.Context, repoPath string) (*PackageIndexForTest, []provider.Limitation, error) {
 	idx, lims, err := loadPackageGraph(ctx, repoPath)
