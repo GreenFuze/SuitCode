@@ -44,6 +44,7 @@ func NewCoordinator(port int, invBinary string) *Coordinator {
 	r.Get("/api/v1/health", c.handleHealth)
 	r.Get("/api/v1/projects", c.handleProjects)
 	r.Post("/api/v1/warmup", c.handleWarmup)
+	r.Post("/api/v1/projects/stop", c.handleStopProject)
 
 	// All other routes are proxied to the relevant investigator.
 	r.HandleFunc("/api/v1/*", c.proxyToInvestigator)
@@ -103,6 +104,12 @@ type warmupPayload struct {
 	ProjectPath string `json:"project_path"`
 	Port        int    `json:"port"`
 	StartedAt   string `json:"started_at"`
+}
+
+// stopPayload is the body returned by POST /api/v1/projects/stop on success.
+type stopPayload struct {
+	OK          bool   `json:"ok"`
+	ProjectPath string `json:"project_path"`
 }
 
 // errorPayload is the body returned for any error response.
@@ -166,6 +173,26 @@ func (c *Coordinator) handleWarmup(w http.ResponseWriter, r *http.Request) {
 		Port:        proc.Port,
 		StartedAt:   proc.StartedAt.Format(time.RFC3339),
 	})
+}
+
+// handleStopProject stops the investigator for the project identified by the
+// X-Suitcode-Project header. Idempotent: an unknown project returns 200 OK.
+func (c *Coordinator) handleStopProject(w http.ResponseWriter, r *http.Request) {
+	projectPath := r.Header.Get(projectPathHeader)
+	if projectPath == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("%s header is required", projectPathHeader))
+		return
+	}
+
+	logf("stop requested for %s", projectPath)
+
+	if err := c.registry.Stop(projectPath); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	logf("stopped investigator for %s", projectPath)
+	writeJSON(w, http.StatusOK, stopPayload{OK: true, ProjectPath: projectPath})
 }
 
 // proxyToInvestigator forwards a feature request to the appropriate investigator.

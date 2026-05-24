@@ -146,6 +146,35 @@ func (r *Registry) List() []*InvestigatorProcess {
 	return out
 }
 
+// Stop gracefully stops the investigator for projectPath.
+// If the project is not registered or the process is already dead, returns nil
+// (idempotent by design — the tray can call this freely).
+func (r *Registry) Stop(projectPath string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	proc, ok := r.processes[projectPath]
+	if !ok {
+		// Not registered — treat as a no-op so callers don't need to check first.
+		return nil
+	}
+
+	// Remove from the registry before killing so the reaper goroutine
+	// (in spawn) does not find a stale entry and log a misleading message.
+	delete(r.processes, projectPath)
+
+	if proc.Cmd != nil && proc.Cmd.Process != nil {
+		logf("stopping investigator for %s (port %d)", projectPath, proc.Port)
+		if err := proc.Cmd.Process.Kill(); err != nil {
+			return fmt.Errorf("registry: stop investigator for %q: %w", projectPath, err)
+		}
+	} else {
+		logf("deregistering reattached investigator for %s (port %d)", projectPath, proc.Port)
+	}
+
+	return nil
+}
+
 // Shutdown kills all running investigator processes.
 func (r *Registry) Shutdown() {
 	r.mu.Lock()

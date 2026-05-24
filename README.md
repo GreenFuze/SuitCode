@@ -13,13 +13,58 @@ is compression ratio: how much of the repo did the agent *not* have to load?
 
 ## Install
 
+### CLI + coordinator (any platform)
+
 ```sh
-go install github.com/GreenFuze/SuitCode/cmd/suitcode@latest
+go install github.com/GreenFuze/SuitCode/suitcode@latest
+go install github.com/GreenFuze/SuitCode/coordinator@latest
+go install github.com/GreenFuze/SuitCode/investigator@latest
 ```
 
-This installs the `suitcode` binary to `$GOPATH/bin` (or `$HOME/go/bin`).
+This installs the three binaries to `$GOPATH/bin` (or `$HOME/go/bin`).
 
 **Requirements:** Go 1.21+, `gopls` on PATH for symbol-level queries.
+
+### System-tray companion (desktop only)
+
+The tray companion shows coordinator status and lets you stop investigators
+from the menu bar. It requires CGo and a desktop environment.
+
+**macOS / Windows** — no extra dependencies:
+
+```sh
+go build -tags systray -o suitcode-tray ./tray
+```
+
+**Linux** — install the AppIndicator library first:
+
+```sh
+# Debian/Ubuntu
+sudo apt install libayatana-appindicator3-dev
+
+# Fedora
+sudo dnf install libayatana-appindicator-gtk3-devel
+```
+
+Then build:
+
+```sh
+go build -tags systray -o suitcode-tray ./tray
+```
+
+> **Headless servers:** omit `-tags systray`. A stub binary is produced
+> automatically by `go install ./...` and exits with a clear error if invoked
+> without a display, so server installs are never broken.
+
+### Quick server install (no CGo, no tray)
+
+On a server or CI machine where you only need the CLI and daemon components:
+
+```sh
+CGO_ENABLED=0 go install github.com/GreenFuze/SuitCode/suitcode@latest
+CGO_ENABLED=0 go install github.com/GreenFuze/SuitCode/coordinator@latest
+CGO_ENABLED=0 go install github.com/GreenFuze/SuitCode/investigator@latest
+```
 
 ## Usage
 
@@ -99,19 +144,22 @@ suitcode . eval run --suite smoke
 ## Architecture
 
 ```
-cmd/suitcode/       — CLI binary entry point
+suitcode/           — thin CLI client (auto-starts coordinator)
+coordinator/        — daemon: routes requests to per-project investigators
+investigator/       — per-project daemon: file index, import graph, gopls
+  artifacts/        — SQLite artifact store (.suitcode/store.db)
+  eval/             — evaluation framework and suites
+  features/         — feature implementations (context capsule, etc.)
+  output/           — markdown renderers
+tray/               — system-tray companion (build with -tags systray)
 core/
   config/           — global and per-project configuration
+  coordinator/      — shared HTTP client + coordinator auto-start logic
   features/         — typed request/response contracts (shared vocabulary)
   provider/         — provider interfaces and vocabulary types
     filesystem/     — file listing with .gitignore support
     vcs/            — git status and diff
     language/go/    — Go import graph (go/packages) + gopls symbol queries
-investigator/
-  artifacts/        — SQLite artifact store (.suitcode/store.db)
-  eval/             — evaluation framework and suites
-  features/         — feature implementations (context capsule, etc.)
-  output/           — markdown renderers
 calllog/            — JSONL call logger (.suitcode/calls.jsonl)
 analytics/          — transcript analysis and capsule quality metrics
 ```
@@ -134,7 +182,10 @@ Contents:
 ## Development
 
 ```sh
-go test ./... -short    # fast tests (skips go/packages load and gopls)
-go test ./...           # full test suite including eval suites
-go build ./cmd/suitcode # build the binary
+go test ./... -short                  # fast tests (skips go/packages load and gopls)
+go test ./...                         # full test suite including eval suites
+go build ./suitcode                   # build CLI client
+go build ./coordinator                # build coordinator daemon
+go build ./investigator               # build investigator daemon
+go build -tags systray ./tray         # build desktop tray (requires CGo)
 ```
