@@ -17,6 +17,8 @@ import (
 	"github.com/GreenFuze/SuitCode/core/provider"
 	"github.com/GreenFuze/SuitCode/core/provider/filesystem"
 	goprovider "github.com/GreenFuze/SuitCode/core/provider/language/go"
+	jsprovider "github.com/GreenFuze/SuitCode/core/provider/language/js"
+	pyprovider "github.com/GreenFuze/SuitCode/core/provider/language/python"
 	"github.com/GreenFuze/SuitCode/core/provider/vcs"
 	"github.com/GreenFuze/SuitCode/investigator/artifacts"
 	invfeatures "github.com/GreenFuze/SuitCode/investigator/features"
@@ -78,7 +80,9 @@ type ProjectInvestigator struct {
 	// Providers
 	fsProvider   *filesystem.Provider
 	vcsProvider  *vcs.Provider
-	langProvider *goprovider.GoLanguageProvider // nil if load failed or not a Go module
+	langProvider *goprovider.GoLanguageProvider    // nil if not a Go module or load failed
+	jsProvider   *jsprovider.JSLanguageProvider    // nil if no JS/TS files found
+	pyProvider   *pyprovider.PythonLanguageProvider // nil if no Python files found
 
 	// Cached file listing (populated during Warm).
 	mu           sync.RWMutex
@@ -119,8 +123,9 @@ func NewProjectInvestigator(ctx context.Context, repoPath string) (*ProjectInves
 		store = nil
 	}
 
-	// Language provider: try to load the Go import graph. Non-fatal on failure —
-	// the investigator falls back to heuristic-only scoring.
+	// Language providers — all are non-fatal. The investigator uses whichever
+	// are available, preferring Go (tool-backed) over JS/TS and Python (heuristic).
+
 	langP, langErr := goprovider.NewGoLanguageProvider(ctx, absPath)
 	if langErr != nil || !langP.Ready() {
 		// If construction succeeded but the provider is not ready, release it
@@ -131,16 +136,32 @@ func NewProjectInvestigator(ctx context.Context, repoPath string) (*ProjectInves
 		langP = nil
 	}
 
+	jsP, jsErr := jsprovider.NewJSLanguageProvider(ctx, absPath)
+	if jsErr != nil || !jsP.Ready() {
+		if jsErr == nil {
+			_ = jsP.Close()
+		}
+		jsP = nil
+	}
+
+	pyP, pyErr := pyprovider.NewPythonLanguageProvider(ctx, absPath)
+	if pyErr != nil || !pyP.Ready() {
+		if pyErr == nil {
+			_ = pyP.Close()
+		}
+		pyP = nil
+	}
+
 	// Require at least one meaningful provider beyond the filesystem layer.
 	// A VCS-less, language-less directory offers too little value to justify
 	// running a daemon. Fail fast so the coordinator surfaces a clear error
 	// rather than serving empty responses forever.
-	if vcsP == nil && langP == nil {
+	if vcsP == nil && langP == nil && jsP == nil && pyP == nil {
 		_ = fsP.Close()
 		return nil, fmt.Errorf(
 			"investigator: %q has no supported providers — "+
 				"not a git repository and no recognized language project "+
-				"(currently supported languages: Go)",
+				"(supported languages: Go, JavaScript, TypeScript, Python)",
 			absPath,
 		)
 	}
@@ -155,6 +176,8 @@ func NewProjectInvestigator(ctx context.Context, repoPath string) (*ProjectInves
 		fsProvider:   fsP,
 		vcsProvider:  vcsP,
 		langProvider: langP,
+		jsProvider:   jsP,
+		pyProvider:   pyP,
 		store:        store,
 		callLogger:   clog,
 	}
@@ -178,6 +201,16 @@ func (inv *ProjectInvestigator) Close() error {
 	}
 	if inv.langProvider != nil {
 		if err := inv.langProvider.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if inv.jsProvider != nil {
+		if err := inv.jsProvider.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if inv.pyProvider != nil {
+		if err := inv.pyProvider.Close(); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -243,7 +276,7 @@ func (inv *ProjectInvestigator) Status() InvestigatorStatus {
 		})
 	}
 
-	// Language (Go import graph + gopls) provider.
+	// Go language provider (import graph + gopls).
 	if inv.langProvider != nil && inv.langProvider.Ready() {
 		caps := inv.langProvider.Capabilities()
 		var summary string
@@ -267,13 +300,39 @@ func (inv *ProjectInvestigator) Status() InvestigatorStatus {
 		})
 	}
 
-	// Future providers — shown as not attached.
-	for _, name := range []string{"test", "build"} {
+	// JS/TS language provider (static import analysis).
+	if inv.jsProvider != nil && inv.jsProvider.Ready() {
+		caps := inv.jsProvider.Capabilities()
 		status.Providers = append(status.Providers, ProviderStatus{
-			ProviderID:  provider.ProviderID(name),
-			DisplayName: fmt.Sprintf("%s provider", name),
+			ProviderID:  caps.ID,
+			DisplayName: caps.DisplayName,
+			Ready:       true,
+			Summary:     "import graph loaded (heuristic)",
+		})
+	} else {
+		status.Providers = append(status.Providers, ProviderStatus{
+			ProviderID:  "js-language",
+			DisplayName: "JS/TS Language Provider (static import analysis)",
 			Ready:       false,
-			Summary:     "not implemented in v1",
+			Summary:     "not ready (no JS/TS files found)",
+		})
+	}
+
+	// Python language provider (static import analysis).
+	if inv.pyProvider != nil && inv.pyProvider.Ready() {
+		caps := inv.pyProvider.Capabilities()
+		status.Providers = append(status.Providers, ProviderStatus{
+			ProviderID:  caps.ID,
+			DisplayName: caps.DisplayName,
+			Ready:       true,
+			Summary:     "import graph loaded (heuristic)",
+		})
+	} else {
+		status.Providers = append(status.Providers, ProviderStatus{
+			ProviderID:  "python-language",
+			DisplayName: "Python Language Provider (static import analysis)",
+			Ready:       false,
+			Summary:     "not ready (no .py files found)",
 		})
 	}
 
@@ -394,12 +453,8 @@ func (inv *ProjectInvestigator) Context(ctx context.Context, req cfeatures.Conte
 		return nil, fmt.Errorf("context: %w", err)
 	}
 
-	// Nil-safe interface assignment: a *goprovider.GoLanguageProvider nil pointer
-	// must NOT be passed as a non-nil interface or method calls will panic.
-	var langProv provider.ImportGraphProvider
-	if inv.langProvider != nil {
-		langProv = inv.langProvider
-	}
+	// Select the best available language provider for this request.
+	langProv := inv.activeLangProvider()
 
 	resp, err := invfeatures.RunContext(ctx, req, listing, inv.estimator, langProv)
 	if err != nil {
@@ -427,11 +482,8 @@ func (inv *ProjectInvestigator) FailureContext(ctx context.Context, req cfeature
 		return nil, fmt.Errorf("failure-context: %w", err)
 	}
 
-	// Same nil-safe interface pattern as Context().
-	var langProv provider.ImportGraphProvider
-	if inv.langProvider != nil {
-		langProv = inv.langProvider
-	}
+	// Select the best available language provider for this request.
+	langProv := inv.activeLangProvider()
 
 	resp, err := invfeatures.RunFailureContext(ctx, req, listing, inv.estimator, langProv)
 	if err != nil {
@@ -473,6 +525,22 @@ func (inv *ProjectInvestigator) VerifyPlan(ctx context.Context, req cfeatures.Ve
 		LatencyMs:       resp.Metrics.Timing.DurationMs,
 	})
 	return resp, nil
+}
+
+// activeLangProvider returns the best available ImportGraphProvider, preferring
+// Go (tool-backed, highest accuracy) over JS/TS and Python (heuristic).
+// Returns nil when no language provider is ready.
+func (inv *ProjectInvestigator) activeLangProvider() provider.ImportGraphProvider {
+	if inv.langProvider != nil {
+		return inv.langProvider
+	}
+	if inv.jsProvider != nil {
+		return inv.jsProvider
+	}
+	if inv.pyProvider != nil {
+		return inv.pyProvider
+	}
+	return nil
 }
 
 // GoplsReady reports whether the gopls subprocess has been started and is ready
