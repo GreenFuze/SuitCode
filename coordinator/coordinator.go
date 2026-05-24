@@ -50,7 +50,7 @@ func NewCoordinator(port int, invBinary string) *Coordinator {
 	r.HandleFunc("/api/v1/*", c.proxyToInvestigator)
 
 	c.server = &http.Server{
-		Addr:              fmt.Sprintf(":%d", port),
+		Addr:              fmt.Sprintf("127.0.0.1:%d", port),
 		Handler:           r,
 		ReadHeaderTimeout: 10 * time.Second,
 	}

@@ -129,17 +129,37 @@ func RunFailureContext(
 		if sig.Kind != "file_path" {
 			continue
 		}
-		// Try to match against the file index.
+		// Try to match against the file index by full path.
 		clean := filepath.ToSlash(filepath.Clean(sig.Value))
 		fsFile, err := findFile(listing, clean, req.RepoPath)
 		if err != nil {
-			// Try just the basename.
+			// Full-path match failed. Attempt basename-only match so that
+			// stack-trace paths like "server/foo/bar.go" can still resolve even
+			// when the working directory prefix differs. Explicitly record a
+			// Limitation so callers know the match is weaker and may be ambiguous
+			// when multiple files share the same basename.
 			base := filepath.Base(clean)
+			var matches []provider.FilesystemFile
 			for _, f := range listing.Data.Files {
 				if filepath.Base(f.RelPath) == base {
-					fsFile = &f
-					break
+					matches = append(matches, f)
 				}
+			}
+			if len(matches) == 1 {
+				fsFile = &matches[0]
+				resp.Limitations = append(resp.Limitations, provider.Limitation{
+					Kind:    "basename_match_only",
+					Message: fmt.Sprintf("log path %q matched by basename only; full-path lookup failed", sig.Value),
+					Scope:   sig.Value,
+				})
+			} else if len(matches) > 1 {
+				// Ambiguous — multiple files with the same basename. Record the
+				// ambiguity and skip rather than guessing.
+				resp.Limitations = append(resp.Limitations, provider.Limitation{
+					Kind:    "ambiguous_basename_match",
+					Message: fmt.Sprintf("log path %q matched %d files by basename — skipping to avoid false positives", sig.Value, len(matches)),
+					Scope:   sig.Value,
+				})
 			}
 		}
 		if fsFile != nil {

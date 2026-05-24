@@ -159,42 +159,63 @@ func parseImports(
 	listing *provider.ProviderResult[provider.FilesystemListing],
 	langProv provider.ImportGraphProvider,
 ) ([]provider.FileReference, []provider.Limitation) {
-	// Prefer the import graph provider when available — it's more accurate than
-	// the heuristic scanners below because it uses the full resolved index.
+	// When the import graph provider is ready, use it exclusively.
+	// An empty result is authoritative ("this file has no local imports") —
+	// we never silently fall back to a weaker signal when a stronger one exists.
 	if langProv != nil && langProv.Ready() {
 		res, err := langProv.FileImports(ctx, f.Path)
-		if err == nil && res != nil && len(res.Data) > 0 {
-			refs := absPathsToImportRefs(res.Data, listing, "import-graph-provider")
-			return refs, res.Limitations
+		if err != nil {
+			return nil, []provider.Limitation{{
+				Kind:    "import_graph_query_failed",
+				Message: fmt.Sprintf("import graph query failed for %s: %v", f.RelPath, err),
+				Scope:   f.RelPath,
+			}}
 		}
+		if res == nil {
+			return nil, []provider.Limitation{{
+				Kind:    "import_graph_no_result",
+				Message: fmt.Sprintf("import graph provider returned nil result for %s", f.RelPath),
+				Scope:   f.RelPath,
+			}}
+		}
+		// Authoritative result — includes all provider-level limitations.
+		refs := absPathsToImportRefs(res.Data, listing, "import-graph-provider")
+		return refs, res.Limitations
 	}
 
-	// Fall back to built-in heuristic scanners for Go and Python.
+	// No import graph provider available — use best-effort heuristic scanner.
+	// A Limitation is always recorded so callers know the source is weaker than
+	// a resolved import graph.
 	switch f.Language {
 	case "Go":
-		return parseGoImports(f, repoPath), nil
+		return parseGoImports(f, repoPath)
 	case "Python":
-		return parsePythonImports(f, repoPath), nil
+		return parsePythonImports(f, repoPath)
 	default:
-		// No parser available for this language.
 		return nil, []provider.Limitation{{
 			Kind:    "no_import_parser",
-			Message: fmt.Sprintf("import parsing not available for %s (no language provider ready)", f.Language),
+			Message: fmt.Sprintf("no language provider ready and no built-in scanner for %s", f.Language),
 			Scope:   f.RelPath,
 		}}
 	}
 }
 
 // parseGoImports scans a Go file for import blocks and resolves local package
-// paths to FileReferences.
-func parseGoImports(f *provider.FilesystemFile, repoPath string) []provider.FileReference {
+// paths to FileReferences. Used only when no import graph provider is ready.
+// Returns a Limitation when the file cannot be read.
+func parseGoImports(f *provider.FilesystemFile, repoPath string) ([]provider.FileReference, []provider.Limitation) {
 	file, err := os.Open(f.Path)
 	if err != nil {
-		return nil
+		return nil, []provider.Limitation{{
+			Kind:    "file_unreadable",
+			Message: fmt.Sprintf("cannot read %s for import scanning: %v", f.RelPath, err),
+			Scope:   f.RelPath,
+		}}
 	}
 	defer file.Close()
 
 	var refs []provider.FileReference
+	var lims []provider.Limitation
 	inBlock := false
 	scanner := bufio.NewScanner(file)
 
@@ -223,8 +244,7 @@ func parseGoImports(f *provider.FilesystemFile, repoPath string) []provider.File
 		}
 
 		// Only record local imports (those starting with the module path or
-		// a relative path). Standard library and external imports are noted
-		// as provenance only.
+		// a relative path). Standard library and external imports are skipped.
 		if isLocalGoImport(importPath, repoPath) {
 			refs = append(refs, provider.FileReference{
 				RelPath:  importPath,
@@ -234,21 +254,34 @@ func parseGoImports(f *provider.FilesystemFile, repoPath string) []provider.File
 					SourceKind:      provider.SourceKindSyntax,
 					SourceTool:      "go_import_scanner",
 					Authority:       provider.AuthorityDerived,
-					EvidenceSummary: fmt.Sprintf("import %q in %s", importPath, f.RelPath),
+					EvidenceSummary: fmt.Sprintf("import %q in %s (heuristic — no import graph available)", importPath, f.RelPath),
 					EvidencePaths:   []string{f.Path},
 				},
 			})
 		}
 	}
 
-	return refs
+	// Always record a limitation so callers know this is a heuristic result.
+	lims = append(lims, provider.Limitation{
+		Kind:    "heuristic_import_scan",
+		Message: fmt.Sprintf("no Go import graph provider ready; imports for %s resolved via regex scan — may be incomplete", f.RelPath),
+		Scope:   f.RelPath,
+	})
+
+	return refs, lims
 }
 
-// parsePythonImports performs a basic scan of Python import statements.
-func parsePythonImports(f *provider.FilesystemFile, _ string) []provider.FileReference {
+// parsePythonImports performs a basic regex scan of Python import statements.
+// Used only when no import graph provider is ready.
+// Returns a Limitation when the file cannot be read.
+func parsePythonImports(f *provider.FilesystemFile, _ string) ([]provider.FileReference, []provider.Limitation) {
 	file, err := os.Open(f.Path)
 	if err != nil {
-		return nil
+		return nil, []provider.Limitation{{
+			Kind:    "file_unreadable",
+			Message: fmt.Sprintf("cannot read %s for import scanning: %v", f.RelPath, err),
+			Scope:   f.RelPath,
+		}}
 	}
 	defer file.Close()
 
@@ -262,14 +295,14 @@ func parsePythonImports(f *provider.FilesystemFile, _ string) []provider.FileRef
 			parts := strings.Fields(line)
 			if len(parts) >= 2 {
 				refs = append(refs, provider.FileReference{
-					RelPath: parts[1],
+					RelPath:  parts[1],
 					Language: "Python",
-					Role:    "source",
+					Role:     "source",
 					Provenance: provider.Provenance{
 						SourceKind:      provider.SourceKindSyntax,
 						SourceTool:      "python_import_scanner",
 						Authority:       provider.AuthorityHeuristic,
-						EvidenceSummary: fmt.Sprintf("relative import %q in %s", parts[1], f.RelPath),
+						EvidenceSummary: fmt.Sprintf("relative import %q in %s (heuristic — no import graph available)", parts[1], f.RelPath),
 						EvidencePaths:   []string{f.Path},
 					},
 				})
@@ -277,7 +310,12 @@ func parsePythonImports(f *provider.FilesystemFile, _ string) []provider.FileRef
 		}
 	}
 
-	return refs
+	// Always record a limitation so callers know this is a heuristic result.
+	return refs, []provider.Limitation{{
+		Kind:    "heuristic_import_scan",
+		Message: fmt.Sprintf("no Python import graph provider ready; imports for %s resolved via regex scan — may be incomplete", f.RelPath),
+		Scope:   f.RelPath,
+	}}
 }
 
 func extractQuoted(s string) string {

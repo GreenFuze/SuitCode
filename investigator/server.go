@@ -52,7 +52,7 @@ func NewServer(inv *ProjectInvestigator, port int, coordinatorURL string) *Serve
 	r.Post("/api/v1/verify-plan", s.handleVerifyPlan)
 
 	s.http = &http.Server{
-		Addr:              fmt.Sprintf(":%d", port),
+		Addr:              fmt.Sprintf("127.0.0.1:%d", port),
 		Handler:           r,
 		ReadHeaderTimeout: 10 * time.Second,
 	}

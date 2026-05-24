@@ -1,19 +1,37 @@
 # SuitCode
 
-**Deterministic repository intelligence for coding agents.**
+**Your coding agent actually knows your codebase. Not guesses — knows.**
 
-SuitCode is a local CLI and HTTP server that answers repository questions by
-walking the actual toolchain — import graphs, build systems, test frameworks,
-language servers — instead of doing text search.
+---
 
-It is designed to be called by coding agents (Claude Code, Cursor, Codex) to
-retrieve a tight "context capsule": the most relevant files for a given task,
-ranked by import-graph proximity, within a token budget. The core value metric
-is compression ratio: how much of the repo did the agent *not* have to load?
+## The problem with AI coding agents
 
-## Install
+When Claude Code, Codex, or Cursor reads your repo, they do text search.
+They find files by name patterns and keyword matches.
+They guess what's related based on proximity and conventions.
 
-### CLI + coordinator (any platform)
+That's fine for a demo. In a real codebase with 500+ files, it means:
+- Loading 200 files when only 12 are relevant
+- Missing the file that actually imports the one you're changing
+- Hitting token limits before reaching the code that matters
+- Hallucinations caused by irrelevant context crowding out the real signal
+
+## What SuitCode does differently
+
+SuitCode speaks your toolchain. It doesn't guess — it asks the tools your language already has:
+
+| Signal | Source | Certainty |
+|--------|--------|-----------|
+| Which files import this one | `go/packages`, TypeScript compiler, Python AST | **Authoritative** |
+| What tests cover this code | Import graph + naming conventions | **Authoritative** |
+| What breaks if this changes | Reverse import graph (full transitive) | **Authoritative** |
+| Symbol definitions and types | `gopls` LSP | **Authoritative** |
+
+SuitCode never returns a result it can't back with a verified signal. If the import graph isn't available, it says so — it does **not** fall back silently to a regex scan and pretend that's the same thing. Every result carries its provenance.
+
+## Quick install
+
+**Requires:** Go 1.21+
 
 ```sh
 go install github.com/GreenFuze/SuitCode/suitcode@latest
@@ -21,44 +39,20 @@ go install github.com/GreenFuze/SuitCode/coordinator@latest
 go install github.com/GreenFuze/SuitCode/investigator@latest
 ```
 
-This installs the three binaries to `$GOPATH/bin` (or `$HOME/go/bin`).
+That's it. All three binaries land in `$GOPATH/bin` (usually `~/go/bin`). The coordinator auto-starts on first use — no config, no daemon management.
 
-**Requirements:** Go 1.21+, `gopls` on PATH for symbol-level queries.
-
-### System-tray companion (desktop only)
-
-The tray companion shows coordinator status and lets you stop investigators
-from the menu bar. It requires CGo and a desktop environment.
-
-**macOS / Windows** — no extra dependencies:
+**Desktop tray** (optional — shows live investigator status in your menu bar):
 
 ```sh
-go build -tags systray -o suitcode-tray ./tray
+# macOS / Windows — no extra dependencies
+go install -tags systray github.com/GreenFuze/SuitCode/tray@latest
+
+# Linux — AppIndicator first
+sudo apt install libayatana-appindicator3-dev   # Debian/Ubuntu
+go install -tags systray github.com/GreenFuze/SuitCode/tray@latest
 ```
 
-**Linux** — install the AppIndicator library first:
-
-```sh
-# Debian/Ubuntu
-sudo apt install libayatana-appindicator3-dev
-
-# Fedora
-sudo dnf install libayatana-appindicator-gtk3-devel
-```
-
-Then build:
-
-```sh
-go build -tags systray -o suitcode-tray ./tray
-```
-
-> **Headless servers:** omit `-tags systray`. A stub binary is produced
-> automatically by `go install ./...` and exits with a clear error if invoked
-> without a display, so server installs are never broken.
-
-### Quick server install (no CGo, no tray)
-
-On a server or CI machine where you only need the CLI and daemon components:
+**CI / headless servers** — CGo-free, no tray:
 
 ```sh
 CGO_ENABLED=0 go install github.com/GreenFuze/SuitCode/suitcode@latest
@@ -66,126 +60,154 @@ CGO_ENABLED=0 go install github.com/GreenFuze/SuitCode/coordinator@latest
 CGO_ENABLED=0 go install github.com/GreenFuze/SuitCode/investigator@latest
 ```
 
-## Usage
+---
 
-```
-suitcode <repo-path> <command> [flags]
-```
+## Why SuitCode?
 
-The repo-path argument is always required and must come before the command.
+### For agents that need to stay within token budgets
 
-### Core commands
-
-| Command | Description |
-|---------|-------------|
-| `status` | Show readiness and provider status |
-| `context` | Compile a bounded context capsule (primary use case) |
-| `repo-overview` | Repository structure and technology overview |
-| `explain-file` | Explain a file's role, imports, and relationships |
-| `related` | Find files related to a given file |
-| `tests` | Find tests relevant to a source file or change |
-| `impact` | Blast radius analysis for a set of changed files |
-| `failure-context` | Extract context from a failure log |
-| `verify-plan` | Generate a verification plan for a set of changes |
-
-### Server mode
+Every SuitCode response comes with a **token budget** you control. Ask for 8,000 tokens of context — SuitCode returns the highest-signal files that fit, ordered by import-graph proximity to your seed files. The rest of the repo doesn't enter the LLM's context window at all.
 
 ```sh
-suitcode . serve --port 7878
+suitcode . context \
+  --files internal/auth/auth.go,internal/auth/tokens.go \
+  --budget 8000
 ```
 
-All features are available via HTTP at `http://localhost:7878/api/v1/<feature>`.
+Typical compression ratio: **10–40×**. 500-file repo → 15 files in context.
 
-### Metrics
+### For agents working across languages
 
-Every feature call appends a structured record to `.suitcode/calls.jsonl` in the
-analyzed repository. No code content — only relative paths and numeric metrics.
+SuitCode is polyglot from day one. In a repo with a Go backend, TypeScript frontend, and Python scripts, SuitCode runs all three import-graph providers simultaneously and merges the results. No "pick one language" compromise.
+
+### For multi-module monorepos
+
+Go workspaces with 16 plugin modules? SuitCode walks every `go.mod` and builds a unified cross-module import graph. A plugin importing from the core module shows as a direct edge — not missing data.
+
+### For teams, not just solo devs
+
+SuitCode runs as a local daemon. Every agent that needs context hits the same coordinator — investigators are shared per project, warmed once, served to everyone. No re-indexing per-session.
+
+---
+
+## What the agents see
+
+### Context capsule
 
 ```sh
-suitcode . metrics show          # tabular summary of recent calls
-suitcode . metrics export        # zip the log for sharing
+suitcode . context --files src/game/game.ts --budget 6000
 ```
 
-### Analytics
+Returns a ranked list of files that are likely relevant to editing `game.ts`:
+- Files it directly imports (import graph — authoritative)
+- Files that import it (reverse edges — authoritative)
+- Co-located test files (naming convention — labeled as such)
+- Related files in the same module
 
-Correlate SuitCode capsule files with Claude Code file operations to measure
-capsule quality (did we include the right files?).
+Each file entry includes: path, language, role, token estimate, and **provenance** — exactly how SuitCode decided it was relevant.
+
+### Blast radius
 
 ```sh
-suitcode . analytics show        # list Claude Code sessions for this project
-suitcode . analytics correlate   # compute per-call hit/miss rates
+suitcode . impact --files internal/store/store.go --git-ref HEAD~1
 ```
 
-### Output
+Shows every file that transitively depends on what changed. Run this before a refactor to know exactly what your PR will break.
 
-Feature results are written to `.suitcode/<feature>/<timestamp>.json` in the
-analyzed repository. The CLI prints a brief summary to stdout; use
-`--format json` or `--format markdown` for full output.
-
-### Examples
+### Test finder
 
 ```sh
-# Compile a context capsule for files you're about to edit
-suitcode . context --files internal/server/main.go,internal/auth/auth.go --budget 8000
-
-# Understand what breaks if you change a file
-suitcode . impact --files internal/auth/auth.go
-
-# Find tests for a changed file
 suitcode . tests --path internal/auth/auth.go
-
-# Explain an unfamiliar file
-suitcode . explain-file --path internal/server/main.go --format markdown
-
-# Run the smoke eval suite to verify correctness
-suitcode . eval run --suite smoke
 ```
+
+Finds test files that cover `auth.go` — by import graph (tests that import the package) and by naming convention. Scored separately so you know which ones are certain.
+
+### Failure context
+
+```sh
+suitcode . failure-context --log build-output.txt
+```
+
+Parses build or test failure output, resolves file paths against the real index, and compiles a context capsule focused on the failing code. Stack traces become navigation.
+
+---
+
+## For Codex / Claude Code integration
+
+SuitCode exposes all features as an HTTP API. The coordinator runs on `127.0.0.1:7878` by default.
+
+```sh
+# Start the coordinator (or let `suitcode` auto-start it)
+coordinator --port 7878
+
+# Warm a project (indexes files + import graph)
+curl -s -X POST http://127.0.0.1:7878/api/v1/warmup \
+  -H 'Content-Type: application/json' \
+  -d '{"repo_path": "/path/to/your/repo"}'
+
+# Request a context capsule
+curl -s -X POST http://127.0.0.1:7878/api/v1/context \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "repo_path": "/path/to/your/repo",
+    "files": ["src/app.ts"],
+    "budget": 8000
+  }'
+```
+
+All responses include a `metrics` block: tokens used, files considered, files included, compression ratio, and whether the import graph was available for this result.
+
+---
+
+## Supported languages
+
+| Language | Import graph | Symbols | Test detection |
+|----------|-------------|---------|----------------|
+| Go | `go/packages` (full, multi-module) | `gopls` | ✓ |
+| TypeScript / JavaScript | Static AST + tsconfig path aliases | — | ✓ |
+| Python | Static AST + relative import resolution | — | ✓ |
+
+More languages are on the roadmap. SuitCode's provider model makes it straightforward to add new language backends without changing the core.
+
+---
 
 ## Architecture
 
 ```
-suitcode/           — thin CLI client (auto-starts coordinator)
-coordinator/        — daemon: routes requests to per-project investigators
-investigator/       — per-project daemon: file index, import graph, gopls
-  artifacts/        — SQLite artifact store (.suitcode/store.db)
-  eval/             — evaluation framework and suites
-  features/         — feature implementations (context capsule, etc.)
-  output/           — markdown renderers
-tray/               — system-tray companion (build with -tags systray)
+suitcode/           — CLI client (auto-starts coordinator on first use)
+coordinator/        — HTTP daemon routing requests to per-project investigators
+investigator/       — per-project daemon: file index, import graph, gopls, features
+  features/         — context capsule, explain-file, related, tests, impact, …
+tray/               — desktop status companion (build with -tags systray)
 core/
-  config/           — global and per-project configuration
-  coordinator/      — shared HTTP client + coordinator auto-start logic
-  features/         — typed request/response contracts (shared vocabulary)
-  provider/         — provider interfaces and vocabulary types
-    filesystem/     — file listing with .gitignore support
+  provider/
+    language/go/    — Go import graph via go/packages + gopls LSP
+    language/js/    — JS/TS import graph + tsconfig alias resolution
+    language/python/— Python import graph (stdlib + relative imports)
+    language/multi/ — composite provider for polyglot repos
+    filesystem/     — file listing with .gitignore + build-artifact exclusion
     vcs/            — git status and diff
-    language/go/    — Go import graph (go/packages) + gopls symbol queries
-calllog/            — JSONL call logger (.suitcode/calls.jsonl)
-analytics/          — transcript analysis and capsule quality metrics
 ```
 
-## State directory
+---
 
-SuitCode creates a `.suitcode/` directory in the root of each analyzed
-repository. This directory should be added to `.gitignore`:
+## Development
+
+```sh
+go test ./... -short           # fast suite (skips go/packages and gopls)
+go test ./...                  # full suite including eval correctness checks
+go build ./suitcode            # CLI
+go build ./coordinator         # coordinator daemon
+go build ./investigator        # investigator daemon
+go build -tags systray ./tray  # desktop tray (requires CGo)
+```
+
+State is written to `.suitcode/` in each analyzed repo. Add it to `.gitignore`:
 
 ```
 .suitcode/
 ```
 
-Contents:
-- `store.db` — SQLite artifact store (run metrics, eval results)
-- `calls.jsonl` — per-call metrics log
-- `<feature>/<timestamp>.json` — full feature result artifacts
-- `config.json` — per-project configuration (optional)
+---
 
-## Development
-
-```sh
-go test ./... -short                  # fast tests (skips go/packages load and gopls)
-go test ./...                         # full test suite including eval suites
-go build ./suitcode                   # build CLI client
-go build ./coordinator                # build coordinator daemon
-go build ./investigator               # build investigator daemon
-go build -tags systray ./tray         # build desktop tray (requires CGo)
-```
+*SuitCode is open source. PRs welcome.*
