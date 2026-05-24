@@ -319,184 +319,213 @@ func (inv *ProjectInvestigator) Status() InvestigatorStatus {
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Feature dispatch — each method delegates to the appropriate feature service.
+//
+// Every method uses named return values + a deferred calllog write so that
+// failures are recorded alongside successes. HasError is set when the call
+// returns a non-nil error. LimitationCount captures quality degradations (e.g.
+// heuristic fallbacks, unresolved import graphs) even on successful responses.
 // ──────────────────────────────────────────────────────────────────────────────
 
-func (inv *ProjectInvestigator) RepoOverview(ctx context.Context, req cfeatures.RepoOverviewRequest) (*cfeatures.RepoOverviewResponse, error) {
+func (inv *ProjectInvestigator) RepoOverview(ctx context.Context, req cfeatures.RepoOverviewRequest) (resp *cfeatures.RepoOverviewResponse, retErr error) {
+	rec := calllog.Record{Feature: "repo-overview", BudgetRequested: req.Budget}
+	defer func() {
+		rec.HasError = retErr != nil
+		if resp != nil {
+			rec.BudgetUsed      = resp.Metrics.Budget.Used
+			rec.LatencyMs       = resp.Metrics.Timing.DurationMs
+			rec.LimitationCount = len(resp.BaseFeatureResponse.Limitations)
+		}
+		inv.appendCall(rec)
+	}()
+
 	listing, err := inv.ensureFileListing(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("repo-overview: %w", err)
 	}
-	resp, err := invfeatures.RunRepoOverview(ctx, req, listing, inv.estimator)
-	if err != nil {
-		return nil, err
-	}
-	inv.appendCall(calllog.Record{
-		Feature:         "repo-overview",
-		BudgetRequested: req.Budget,
-		BudgetUsed:      resp.Metrics.Budget.Used,
-		LatencyMs:       resp.Metrics.Timing.DurationMs,
-	})
-	return resp, nil
+	return invfeatures.RunRepoOverview(ctx, req, listing, inv.estimator)
 }
 
-func (inv *ProjectInvestigator) ExplainFile(ctx context.Context, req cfeatures.ExplainFileRequest) (*cfeatures.ExplainFileResponse, error) {
+func (inv *ProjectInvestigator) ExplainFile(ctx context.Context, req cfeatures.ExplainFileRequest) (resp *cfeatures.ExplainFileResponse, retErr error) {
+	rec := calllog.Record{
+		Feature:         "explain-file",
+		SeedFiles:       relPaths(inv.repoPath, []string{req.FilePath}),
+		BudgetRequested: req.Budget,
+	}
+	defer func() {
+		rec.HasError = retErr != nil
+		if resp != nil {
+			rec.BudgetUsed      = resp.Metrics.Budget.Used
+			rec.LatencyMs       = resp.Metrics.Timing.DurationMs
+			rec.LimitationCount = len(resp.BaseFeatureResponse.Limitations)
+		}
+		inv.appendCall(rec)
+	}()
+
 	listing, err := inv.ensureFileListing(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("explain-file: %w", err)
 	}
-	resp, err := invfeatures.RunExplainFile(ctx, req, listing, inv.estimator, inv.multiProvider)
-	if err != nil {
-		return nil, err
-	}
-	inv.appendCall(calllog.Record{
-		Feature:         "explain-file",
-		SeedFiles:       relPaths(inv.repoPath, []string{req.FilePath}),
-		BudgetRequested: req.Budget,
-		BudgetUsed:      resp.Metrics.Budget.Used,
-		LatencyMs:       resp.Metrics.Timing.DurationMs,
-	})
-	return resp, nil
+	return invfeatures.RunExplainFile(ctx, req, listing, inv.estimator, inv.multiProvider)
 }
 
-func (inv *ProjectInvestigator) Related(ctx context.Context, req cfeatures.RelatedRequest) (*cfeatures.RelatedResponse, error) {
+func (inv *ProjectInvestigator) Related(ctx context.Context, req cfeatures.RelatedRequest) (resp *cfeatures.RelatedResponse, retErr error) {
+	rec := calllog.Record{
+		Feature:         "related",
+		SeedFiles:       relPaths(inv.repoPath, []string{req.FilePath}),
+		BudgetRequested: req.Budget,
+	}
+	defer func() {
+		rec.HasError = retErr != nil
+		if resp != nil {
+			rec.BudgetUsed      = resp.Metrics.Budget.Used
+			rec.LatencyMs       = resp.Metrics.Timing.DurationMs
+			rec.LimitationCount = len(resp.BaseFeatureResponse.Limitations)
+		}
+		inv.appendCall(rec)
+	}()
+
 	listing, err := inv.ensureFileListing(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("related: %w", err)
 	}
-	resp, err := invfeatures.RunRelated(ctx, req, listing, inv.estimator, inv.multiProvider)
-	if err != nil {
-		return nil, err
-	}
-	inv.appendCall(calllog.Record{
-		Feature:         "related",
-		SeedFiles:       relPaths(inv.repoPath, []string{req.FilePath}),
-		BudgetRequested: req.Budget,
-		BudgetUsed:      resp.Metrics.Budget.Used,
-		LatencyMs:       resp.Metrics.Timing.DurationMs,
-	})
-	return resp, nil
+	return invfeatures.RunRelated(ctx, req, listing, inv.estimator, inv.multiProvider)
 }
 
-func (inv *ProjectInvestigator) Tests(ctx context.Context, req cfeatures.TestsRequest) (*cfeatures.TestsResponse, error) {
+func (inv *ProjectInvestigator) Tests(ctx context.Context, req cfeatures.TestsRequest) (resp *cfeatures.TestsResponse, retErr error) {
+	rec := calllog.Record{
+		Feature:         "tests",
+		SeedFiles:       relPaths(inv.repoPath, []string{req.FilePath}),
+		BudgetRequested: req.Budget,
+	}
+	defer func() {
+		rec.HasError = retErr != nil
+		if resp != nil {
+			rec.BudgetUsed      = resp.Metrics.Budget.Used
+			rec.LatencyMs       = resp.Metrics.Timing.DurationMs
+			rec.LimitationCount = len(resp.BaseFeatureResponse.Limitations)
+		}
+		inv.appendCall(rec)
+	}()
+
 	listing, err := inv.ensureFileListing(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("tests: %w", err)
 	}
-	resp, err := invfeatures.RunTests(ctx, req, listing, inv.estimator, inv.multiProvider)
-	if err != nil {
-		return nil, err
-	}
-	inv.appendCall(calllog.Record{
-		Feature:         "tests",
-		SeedFiles:       relPaths(inv.repoPath, []string{req.FilePath}),
-		BudgetRequested: req.Budget,
-		BudgetUsed:      resp.Metrics.Budget.Used,
-		LatencyMs:       resp.Metrics.Timing.DurationMs,
-	})
-	return resp, nil
+	return invfeatures.RunTests(ctx, req, listing, inv.estimator, inv.multiProvider)
 }
 
-func (inv *ProjectInvestigator) Impact(ctx context.Context, req cfeatures.ImpactRequest) (*cfeatures.ImpactResponse, error) {
+func (inv *ProjectInvestigator) Impact(ctx context.Context, req cfeatures.ImpactRequest) (resp *cfeatures.ImpactResponse, retErr error) {
+	rec := calllog.Record{
+		Feature:         "impact",
+		SeedFiles:       relPaths(inv.repoPath, req.FilePaths),
+		BudgetRequested: req.Budget,
+	}
+	defer func() {
+		rec.HasError = retErr != nil
+		if resp != nil {
+			rec.BudgetUsed      = resp.Metrics.Budget.Used
+			rec.LatencyMs       = resp.Metrics.Timing.DurationMs
+			rec.LimitationCount = len(resp.BaseFeatureResponse.Limitations)
+		}
+		inv.appendCall(rec)
+	}()
+
 	listing, err := inv.ensureFileListing(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("impact: %w", err)
 	}
 
 	var vcsResult *provider.ProviderResult[provider.VCSDiff]
-	var vcsErr error
 	if inv.vcsProvider != nil && req.GitRef != "" {
+		var vcsErr error
 		vcsResult, vcsErr = inv.vcsProvider.Diff(ctx, req.GitRef, "")
 		if vcsErr != nil {
 			return nil, fmt.Errorf("impact: getting diff: %w", vcsErr)
 		}
 	}
 
-	resp, err := invfeatures.RunImpact(ctx, req, listing, vcsResult, inv.estimator)
-	if err != nil {
-		return nil, err
-	}
-	inv.appendCall(calllog.Record{
-		Feature:         "impact",
-		SeedFiles:       relPaths(inv.repoPath, req.FilePaths),
-		BudgetRequested: req.Budget,
-		BudgetUsed:      resp.Metrics.Budget.Used,
-		LatencyMs:       resp.Metrics.Timing.DurationMs,
-	})
-	return resp, nil
+	return invfeatures.RunImpact(ctx, req, listing, vcsResult, inv.estimator)
 }
 
-func (inv *ProjectInvestigator) Context(ctx context.Context, req cfeatures.ContextRequest) (*cfeatures.ContextResponse, error) {
+func (inv *ProjectInvestigator) Context(ctx context.Context, req cfeatures.ContextRequest) (resp *cfeatures.ContextResponse, retErr error) {
+	rec := calllog.Record{
+		Feature:         "context",
+		SeedFiles:       relPaths(inv.repoPath, req.Files),
+		BudgetRequested: req.Budget,
+	}
+	defer func() {
+		rec.HasError = retErr != nil
+		if resp != nil {
+			rec.FilesReturned      = resp.IncludedRelPaths
+			rec.CandidatesTotal    = resp.FilesConsidered
+			rec.FilesIncluded      = resp.FilesIncluded
+			rec.CompressionRatio   = resp.CompressionRatio
+			rec.BudgetUsed         = resp.Metrics.Budget.Used
+			rec.LatencyMs          = resp.Metrics.Timing.DurationMs
+			rec.ImportEdgesScanned = resp.Metrics.ContextReduction.ImportEdgesScanned
+			rec.LspEnhanced        = resp.Metrics.ContextReduction.LspEnhanced
+			rec.LimitationCount    = len(resp.BaseFeatureResponse.Limitations)
+		}
+		inv.appendCall(rec)
+	}()
+
 	listing, err := inv.ensureFileListing(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("context: %w", err)
 	}
-
-	resp, err := invfeatures.RunContext(ctx, req, listing, inv.estimator, inv.multiProvider)
-	if err != nil {
-		return nil, err
-	}
-	inv.appendCall(calllog.Record{
-		Feature:            "context",
-		SeedFiles:          relPaths(inv.repoPath, req.Files),
-		FilesReturned:      resp.IncludedRelPaths,
-		CandidatesTotal:    resp.FilesConsidered,
-		FilesIncluded:      resp.FilesIncluded,
-		CompressionRatio:   resp.CompressionRatio,
-		BudgetRequested:    req.Budget,
-		BudgetUsed:         resp.Metrics.Budget.Used,
-		LatencyMs:          resp.Metrics.Timing.DurationMs,
-		ImportEdgesScanned: resp.Metrics.ContextReduction.ImportEdgesScanned,
-		LspEnhanced:        resp.Metrics.ContextReduction.LspEnhanced,
-	})
-	return resp, nil
+	return invfeatures.RunContext(ctx, req, listing, inv.estimator, inv.multiProvider)
 }
 
-func (inv *ProjectInvestigator) FailureContext(ctx context.Context, req cfeatures.FailureContextRequest) (*cfeatures.FailureContextResponse, error) {
+func (inv *ProjectInvestigator) FailureContext(ctx context.Context, req cfeatures.FailureContextRequest) (resp *cfeatures.FailureContextResponse, retErr error) {
+	rec := calllog.Record{Feature: "failure-context", BudgetRequested: req.Budget}
+	defer func() {
+		rec.HasError = retErr != nil
+		if resp != nil {
+			rec.BudgetUsed      = resp.Metrics.Budget.Used
+			rec.LatencyMs       = resp.Metrics.Timing.DurationMs
+			rec.LimitationCount = len(resp.BaseFeatureResponse.Limitations)
+		}
+		inv.appendCall(rec)
+	}()
+
 	listing, err := inv.ensureFileListing(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failure-context: %w", err)
 	}
-
-	resp, err := invfeatures.RunFailureContext(ctx, req, listing, inv.estimator, inv.multiProvider)
-	if err != nil {
-		return nil, err
-	}
-	inv.appendCall(calllog.Record{
-		Feature:         "failure-context",
-		BudgetRequested: req.Budget,
-		BudgetUsed:      resp.Metrics.Budget.Used,
-		LatencyMs:       resp.Metrics.Timing.DurationMs,
-	})
-	return resp, nil
+	return invfeatures.RunFailureContext(ctx, req, listing, inv.estimator, inv.multiProvider)
 }
 
-func (inv *ProjectInvestigator) VerifyPlan(ctx context.Context, req cfeatures.VerifyPlanRequest) (*cfeatures.VerifyPlanResponse, error) {
+func (inv *ProjectInvestigator) VerifyPlan(ctx context.Context, req cfeatures.VerifyPlanRequest) (resp *cfeatures.VerifyPlanResponse, retErr error) {
+	rec := calllog.Record{
+		Feature:         "verify-plan",
+		SeedFiles:       relPaths(inv.repoPath, req.FilePaths),
+		BudgetRequested: req.Budget,
+	}
+	defer func() {
+		rec.HasError = retErr != nil
+		if resp != nil {
+			rec.BudgetUsed      = resp.Metrics.Budget.Used
+			rec.LatencyMs       = resp.Metrics.Timing.DurationMs
+			rec.LimitationCount = len(resp.BaseFeatureResponse.Limitations)
+		}
+		inv.appendCall(rec)
+	}()
+
 	listing, err := inv.ensureFileListing(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("verify-plan: %w", err)
 	}
 
 	var vcsResult *provider.ProviderResult[provider.VCSDiff]
-	var vcsErr error
 	if inv.vcsProvider != nil && req.GitRef != "" {
+		var vcsErr error
 		vcsResult, vcsErr = inv.vcsProvider.Diff(ctx, req.GitRef, "")
 		if vcsErr != nil {
 			return nil, fmt.Errorf("verify-plan: getting diff: %w", vcsErr)
 		}
 	}
 
-	resp, err := invfeatures.RunVerifyPlan(ctx, req, listing, vcsResult, inv.estimator)
-	if err != nil {
-		return nil, err
-	}
-	inv.appendCall(calllog.Record{
-		Feature:         "verify-plan",
-		SeedFiles:       relPaths(inv.repoPath, req.FilePaths),
-		BudgetRequested: req.Budget,
-		BudgetUsed:      resp.Metrics.Budget.Used,
-		LatencyMs:       resp.Metrics.Timing.DurationMs,
-	})
-	return resp, nil
+	return invfeatures.RunVerifyPlan(ctx, req, listing, vcsResult, inv.estimator)
 }
 
 // GoplsReady reports whether the gopls subprocess has been started and is ready

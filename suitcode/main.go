@@ -29,6 +29,11 @@ import (
 
 const defaultCoordinatorURL = "http://127.0.0.1:7878"
 
+// logCalls is set by the --log-calls persistent flag. When true, every feature
+// call prints a compact one-line metric summary to stderr even when --format json
+// is used. Useful for monitoring agent sessions without polluting JSON output.
+var logCalls bool
+
 // usage is the full reference shown for --help / -h / usage / bare invocation.
 const usage = `SuitCode — deterministic repository intelligence for coding agents
 
@@ -95,7 +100,11 @@ COMMANDS:
                      --files <f1,f2,...>  or  --from <git-ref>  [one required]
 
   metrics          Show or export per-call timing and token-budget statistics.
-    show             Print a table of recent calls (--last N, default 50)
+    summary          Condensed session overview (errors, warnings, latency,
+                     token budget, compression ratio). ~15 lines. Copy-paste
+                     this to transfer analytics across air-gapped machines.
+                       --last N   limit to the most recent N records (0 = all)
+    show             Per-call table of recent calls (--last N, default 50)
     export           Package the call log as a shareable zip
 
 OUTPUT:
@@ -105,6 +114,11 @@ OUTPUT:
   Pass --format json to receive the full structured response on stdout.
   Agents should use --format json for programmatic use — the JSON contains
   all evidence, provenance, metrics, and limitation notices.
+
+GLOBAL FLAGS:
+  --log-calls   Print a compact metric line to stderr after each feature call,
+                even in --format json mode. Useful for monitoring an agent
+                session: suitcode . context --files ... --format json --log-calls
 
 EXAMPLES:
   # Pre-warm once per coding session (do this first)
@@ -212,6 +226,11 @@ func newRootCmd(repoPath string) *cobra.Command {
 			fmt.Print(usage)
 		},
 	}
+
+	// --log-calls: persistent flag that enables per-call metric lines on stderr.
+	// Works alongside both --format json (agent use) and the default brief output.
+	root.PersistentFlags().BoolVar(&logCalls, "log-calls", false,
+		"print a compact metric line to stderr after each feature call (useful for monitoring agent sessions)")
 
 	root.AddCommand(
 		newStatusCmd(repoPath),
@@ -338,6 +357,8 @@ func newRepoOverviewCmd(repoPath string) *cobra.Command {
 				printProgress(resp.BaseFeatureResponse)
 				fmt.Printf("Repository overview: %d files · %d languages · %d build systems\n",
 					resp.TotalFiles, len(resp.Languages), len(resp.BuildSystems))
+			}, func() {
+				printCallLog("repo-overview", resp.BaseFeatureResponse, 0, 0, 0)
 			})
 		},
 	}
@@ -384,6 +405,8 @@ func newExplainFileCmd(repoPath string) *cobra.Command {
 			return printFeatureResult(resp, format, func(resp *cfeatures.ExplainFileResponse) {
 				printProgress(resp.BaseFeatureResponse)
 				fmt.Printf("File explanation: %s · %d tokens\n", filepath.Base(path), resp.Metrics.Budget.Used)
+			}, func() {
+				printCallLog("explain-file", resp.BaseFeatureResponse, 0, 0, 0)
 			})
 		},
 	}
@@ -431,6 +454,8 @@ func newRelatedCmd(repoPath string) *cobra.Command {
 			return printFeatureResult(resp, format, func(resp *cfeatures.RelatedResponse) {
 				printProgress(resp.BaseFeatureResponse)
 				fmt.Printf("Related files: %d found · %d tokens\n", len(resp.RelatedFiles), resp.Metrics.Budget.Used)
+			}, func() {
+				printCallLog("related", resp.BaseFeatureResponse, 0, 0, 0)
 			})
 		},
 	}
@@ -476,6 +501,8 @@ func newTestsCmd(repoPath string) *cobra.Command {
 			return printFeatureResult(resp, format, func(resp *cfeatures.TestsResponse) {
 				printProgress(resp.BaseFeatureResponse)
 				fmt.Printf("Relevant tests: %d found · %d tokens\n", len(resp.RelevantTests), resp.Metrics.Budget.Used)
+			}, func() {
+				printCallLog("tests", resp.BaseFeatureResponse, 0, 0, 0)
 			})
 		},
 	}
@@ -528,6 +555,8 @@ func newImpactCmd(repoPath string) *cobra.Command {
 			return printFeatureResult(resp, format, func(resp *cfeatures.ImpactResponse) {
 				printProgress(resp.BaseFeatureResponse)
 				fmt.Printf("Impact: %d downstream files · %d tokens\n", len(resp.ImpactedFiles), resp.Metrics.Budget.Used)
+			}, func() {
+				printCallLog("impact", resp.BaseFeatureResponse, 0, 0, 0)
 			})
 		},
 	}
@@ -582,6 +611,8 @@ func newContextCmd(repoPath string) *cobra.Command {
 				saved := int((1 - resp.CompressionRatio) * 100)
 				fmt.Printf("Context capsule: %d files · %d/%d tokens (%d%% saved)\n",
 					resp.FilesIncluded, resp.Metrics.Budget.Used, resp.Metrics.Budget.Requested, saved)
+			}, func() {
+				printCallLog("context", resp.BaseFeatureResponse, resp.FilesIncluded, resp.FilesConsidered, resp.CompressionRatio)
 			})
 		},
 	}
@@ -630,6 +661,8 @@ func newFailureContextCmd(repoPath string) *cobra.Command {
 			return printFeatureResult(resp, format, func(resp *cfeatures.FailureContextResponse) {
 				printProgress(resp.BaseFeatureResponse)
 				fmt.Printf("Failure context: %d suspected files · %d tokens\n", len(resp.SuspectedFiles), resp.Metrics.Budget.Used)
+			}, func() {
+				printCallLog("failure-context", resp.BaseFeatureResponse, 0, 0, 0)
 			})
 		},
 	}
@@ -681,6 +714,8 @@ func newVerifyPlanCmd(repoPath string) *cobra.Command {
 			return printFeatureResult(resp, format, func(resp *cfeatures.VerifyPlanResponse) {
 				printProgress(resp.BaseFeatureResponse)
 				fmt.Printf("Verification plan: %d commands · %d tokens\n", len(resp.Commands), resp.Metrics.Budget.Used)
+			}, func() {
+				printCallLog("verify-plan", resp.BaseFeatureResponse, 0, 0, 0)
 			})
 		},
 	}
@@ -701,9 +736,43 @@ func newMetricsCmd(repoPath string) *cobra.Command {
 		Use:   "metrics",
 		Short: "Show or export per-call metrics from .suitcode/calls.jsonl",
 	}
+	metricsCmd.AddCommand(newMetricsSummaryCmd(repoPath))
 	metricsCmd.AddCommand(newMetricsShowCmd(repoPath))
 	metricsCmd.AddCommand(newMetricsExportCmd(repoPath))
 	return metricsCmd
+}
+
+func newMetricsSummaryCmd(repoPath string) *cobra.Command {
+	var last int
+
+	cmd := &cobra.Command{
+		Use:   "summary",
+		Short: "Print a condensed, copy-pasteable session summary (errors, warnings, avg latency, token budget)",
+		Long: `Aggregates the call log by feature and prints a compact summary block.
+
+Designed for transferring session analytics across air-gapped machines: run
+this command, copy the ~15-line output, and paste it into a GitHub issue or
+share it with the SuitCode dev team.
+
+Fields:
+  calls   — total feature invocations
+  err     — calls that failed to produce a response (recorded for visibility)
+  warn    — calls with Limitation notices (degraded quality: heuristic fallbacks,
+             unresolved imports, etc.)
+  avg_ms  — mean wall-clock latency in milliseconds
+  avg_tok — mean token budget used (only for features that consume a budget)
+  ratio   — mean compression ratio (files-in-context vs. files-in-repo)`,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			clog, err := calllog.New(repoPath)
+			if err != nil {
+				return fmt.Errorf("metrics summary: %w", err)
+			}
+			return clog.PrintAggregateSummary(os.Stdout, last)
+		},
+	}
+
+	cmd.Flags().IntVar(&last, "last", 0, "limit to the most recent N records (0 = all)")
+	return cmd
 }
 
 func newMetricsShowCmd(repoPath string) *cobra.Command {
@@ -767,11 +836,20 @@ func newMetricsExportCmd(repoPath string) *cobra.Command {
 // brief-summary rendering for any typed feature response. T is inferred from
 // the brief function's parameter. The brief callback is responsible for calling
 // printProgress and emitting its own one-line summary to stdout.
-func printFeatureResult[T any](resp *T, format string, brief func(*T)) error {
+//
+// logCallFn is called after the response is handled (in both json and brief
+// modes) when the --log-calls flag is set. Pass nil to skip per-call logging.
+func printFeatureResult[T any](resp *T, format string, brief func(*T), logCallFn func()) error {
 	if format == "json" {
+		if logCalls && logCallFn != nil {
+			logCallFn()
+		}
 		return writeJSON(resp)
 	}
-	brief(resp)
+	brief(resp) // brief already calls printProgress which logs progress
+	if logCalls && logCallFn != nil {
+		logCallFn()
+	}
 	return nil
 }
 
@@ -800,6 +878,26 @@ func printProgress(base cfeatures.BaseFeatureResponse) {
 	for _, lim := range base.Limitations {
 		logf("limitation/%s: %s", lim.Kind, lim.Message)
 	}
+}
+
+// printCallLog writes a compact one-liner to stderr for the --log-calls flag.
+// Format: [call] <feature> <ms>ms tok=<used>/<budget> [files=<in>/<total>] [ratio=<x>×] [warn=<n>]
+// Called only when logCalls == true.
+func printCallLog(feature string, base cfeatures.BaseFeatureResponse, filesIn, filesTotal int, compressionRatio float64) {
+	m := base.Metrics
+	line := fmt.Sprintf("[call] %-16s %4dms  tok=%d/%d",
+		feature, m.Timing.DurationMs, m.Budget.Used, m.Budget.Requested)
+
+	if filesTotal > 0 {
+		line += fmt.Sprintf("  files=%d/%d", filesIn, filesTotal)
+	}
+	if filesTotal > 0 && compressionRatio > 0 {
+		line += fmt.Sprintf("  ratio=%.1f×", 1.0/compressionRatio)
+	}
+	if n := len(base.Limitations); n > 0 {
+		line += fmt.Sprintf("  warn=%d", n)
+	}
+	logf("%s", line)
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

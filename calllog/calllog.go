@@ -36,6 +36,15 @@ type Record struct {
 	LatencyMs          int64    `json:"latency_ms"`
 	ImportEdgesScanned int      `json:"import_edges_scanned"`
 	LspEnhanced        bool     `json:"lsp_enhanced"`
+
+	// HasError is true when the feature call failed to produce a response.
+	// The call is still recorded so the summary can surface error rates.
+	HasError bool `json:"has_error,omitempty"`
+
+	// LimitationCount is the number of Limitation notices in the response.
+	// A non-zero value means the answer is degraded in some way (missing
+	// import graph, heuristic fallbacks, unresolved files, etc.).
+	LimitationCount int `json:"limitation_count,omitempty"`
 }
 
 // Logger appends Records to <repoPath>/.suitcode/calls.jsonl.
@@ -219,6 +228,221 @@ func (l *Logger) Export(outputPath string) error {
 
 	return nil
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Aggregate summary (condensed session overview)
+// ──────────────────────────────────────────────────────────────────────────────
+
+// featureStat accumulates metrics for one feature across a set of records.
+type featureStat struct {
+	calls       int
+	errors      int   // calls where HasError == true
+	warnings    int   // calls where LimitationCount > 0 (degraded response)
+	totalMs     int64
+	totalTok    int64 // sum of BudgetUsed (for calls with BudgetUsed > 0)
+	tokCalls    int   // number of calls that had BudgetUsed > 0
+	ratioSum    float64 // sum of (1/CompressionRatio) for calls with CandidatesTotal > 0
+	ratioCalls  int   // number of calls that had a compression ratio
+}
+
+// PrintAggregateSummary writes a condensed, human-readable session summary to w.
+// It aggregates the most recent 'last' records (0 = all) by feature and prints
+// per-feature stats plus a problems section. Output is designed to be
+// copy-pasteable in ~15 lines.
+func (l *Logger) PrintAggregateSummary(w io.Writer, last int) error {
+	records, err := l.LoadAll()
+	if err != nil {
+		return err
+	}
+	if len(records) == 0 {
+		fmt.Fprintln(w, "No call records found in", l.path)
+		return nil
+	}
+
+	// Trim to last N if requested.
+	if last > 0 && len(records) > last {
+		records = records[len(records)-last:]
+	}
+
+	// Parse first/last timestamps for period line.
+	var firstTS, lastTS time.Time
+	for _, r := range records {
+		t, parseErr := time.Parse(time.RFC3339, r.TS)
+		if parseErr != nil {
+			continue
+		}
+		t = t.Local()
+		if firstTS.IsZero() || t.Before(firstTS) {
+			firstTS = t
+		}
+		if t.After(lastTS) {
+			lastTS = t
+		}
+	}
+
+	// Aggregate by feature in insertion order (use a slice to preserve order).
+	type featureEntry struct {
+		name string
+		stat *featureStat
+	}
+	orderSeen := make([]string, 0, 8)
+	statMap := make(map[string]*featureStat, 8)
+
+	for _, r := range records {
+		if _, exists := statMap[r.Feature]; !exists {
+			orderSeen = append(orderSeen, r.Feature)
+			statMap[r.Feature] = &featureStat{}
+		}
+		s := statMap[r.Feature]
+		s.calls++
+		if r.HasError {
+			s.errors++
+		}
+		if r.LimitationCount > 0 {
+			s.warnings++
+		}
+		s.totalMs += r.LatencyMs
+		if r.BudgetUsed > 0 {
+			s.totalTok += int64(r.BudgetUsed)
+			s.tokCalls++
+		}
+		if r.CandidatesTotal > 0 && r.CompressionRatio > 0 {
+			s.ratioSum += 1.0 / r.CompressionRatio
+			s.ratioCalls++
+		}
+	}
+
+	// Compute totals.
+	totals := &featureStat{}
+	for _, s := range statMap {
+		totals.calls += s.calls
+		totals.errors += s.errors
+		totals.warnings += s.warnings
+		totals.totalMs += s.totalMs
+		totals.totalTok += s.totalTok
+		totals.tokCalls += s.tokCalls
+		totals.ratioSum += s.ratioSum
+		totals.ratioCalls += s.ratioCalls
+	}
+
+	const bar = "══════════════════════════════════════════════════════════════"
+	const div = "──────────────────────────────────────────────────────────────"
+
+	// Header.
+	fmt.Fprintln(w, bar)
+	fmt.Fprintln(w, "  SuitCode Call Summary")
+	fmt.Fprintln(w, bar)
+
+	// Period line.
+	if !firstTS.IsZero() {
+		span := lastTS.Sub(firstTS).Round(time.Minute)
+		fmt.Fprintf(w, "  period   %s – %s  (%s · %d calls)\n",
+			firstTS.Format("2006-01-02 15:04"),
+			lastTS.Format("15:04"),
+			formatDuration(span),
+			totals.calls,
+		)
+	}
+	fmt.Fprintln(w)
+
+	// Table header.
+	fmt.Fprintf(w, "  %-18s  %5s  %5s  %5s  %7s  %8s  %7s\n",
+		"feature", "calls", "err", "warn", "avg_ms", "avg_tok", "ratio")
+	fmt.Fprintln(w, " "+div)
+
+	// Per-feature rows.
+	for _, name := range orderSeen {
+		s := statMap[name]
+		avgMs := "-"
+		if s.calls > 0 {
+			avgMs = fmt.Sprintf("%d", s.totalMs/int64(s.calls))
+		}
+		avgTok := "-"
+		if s.tokCalls > 0 {
+			avgTok = formatThousands(int(s.totalTok / int64(s.tokCalls)))
+		}
+		avgRatio := "-"
+		if s.ratioCalls > 0 {
+			avgRatio = fmt.Sprintf("%.1f×", s.ratioSum/float64(s.ratioCalls))
+		}
+		fmt.Fprintf(w, "  %-18s  %5d  %5d  %5d  %7s  %8s  %7s\n",
+			name, s.calls, s.errors, s.warnings, avgMs, avgTok, avgRatio)
+	}
+
+	// Totals row.
+	fmt.Fprintln(w, " "+div)
+	avgMsTot := "-"
+	if totals.calls > 0 {
+		avgMsTot = fmt.Sprintf("%d", totals.totalMs/int64(totals.calls))
+	}
+	avgTokTot := "-"
+	if totals.tokCalls > 0 {
+		avgTokTot = formatThousands(int(totals.totalTok / int64(totals.tokCalls)))
+	}
+	avgRatioTot := "-"
+	if totals.ratioCalls > 0 {
+		avgRatioTot = fmt.Sprintf("%.1f×", totals.ratioSum/float64(totals.ratioCalls))
+	}
+	fmt.Fprintf(w, "  %-18s  %5d  %5d  %5d  %7s  %8s  %7s\n",
+		"totals", totals.calls, totals.errors, totals.warnings,
+		avgMsTot, avgTokTot, avgRatioTot)
+
+	// Problems section — only shown when there are errors or warnings.
+	if totals.errors > 0 || totals.warnings > 0 {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "  problems:")
+		for _, name := range orderSeen {
+			s := statMap[name]
+			if s.errors > 0 {
+				fmt.Fprintf(w, "    %d error(s)   in %-18s — call failed to complete\n", s.errors, name)
+			}
+		}
+		for _, name := range orderSeen {
+			s := statMap[name]
+			if s.warnings > 0 {
+				fmt.Fprintf(w, "    %d warning(s) in %-18s — response had limitations (degraded quality)\n", s.warnings, name)
+			}
+		}
+	}
+
+	fmt.Fprintln(w, bar)
+	fmt.Fprintf(w, "  source: %s\n", l.path)
+	return nil
+}
+
+// formatDuration formats a duration as a human-readable string ("2h 3m", "45m", "30s").
+func formatDuration(d time.Duration) string {
+	if d >= time.Hour {
+		h := int(d.Hours())
+		m := int(d.Minutes()) % 60
+		if m == 0 {
+			return fmt.Sprintf("%dh", h)
+		}
+		return fmt.Sprintf("%dh %dm", h, m)
+	}
+	if d >= time.Minute {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	return fmt.Sprintf("%ds", int(d.Seconds()))
+}
+
+// formatThousands formats an integer with comma thousands separators ("6,241").
+func formatThousands(n int) string {
+	s := fmt.Sprintf("%d", n)
+	if len(s) <= 3 {
+		return s
+	}
+	var result []byte
+	for i, c := range s {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			result = append(result, ',')
+		}
+		result = append(result, byte(c))
+	}
+	return string(result)
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 
 // truncate shortens s to at most n runes, appending "…" if truncated.
 func truncate(s string, n int) string {
