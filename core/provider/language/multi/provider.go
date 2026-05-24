@@ -118,6 +118,17 @@ func (m *MultiLangProvider) GoplsReady() bool {
 	return m.goProvider != nil && m.goProvider.GoplsReady()
 }
 
+// WaitForGopls blocks until the Go provider's gopls subprocess has finished
+// starting (success or failure) or until ctx is cancelled. Returns true if
+// gopls is ready for symbol queries. Returns true immediately when no Go
+// provider is present (gopls is not applicable to the repository).
+func (m *MultiLangProvider) WaitForGopls(ctx context.Context) bool {
+	if m.goProvider == nil {
+		return true
+	}
+	return m.goProvider.WaitForGopls(ctx)
+}
+
 // JSReady reports whether the JavaScript/TypeScript import graph is ready.
 func (m *MultiLangProvider) JSReady() bool {
 	return m.jsProvider != nil && m.jsProvider.Ready()

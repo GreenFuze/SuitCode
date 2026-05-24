@@ -53,6 +53,10 @@ type GoLanguageProvider struct {
 	// goplsClosed is set by Close() to prevent a post-close goroutine from
 	// storing a freshly-initialized goplsClient.
 	goplsClosed atomic.Bool
+	// goplsDone is closed when the gopls startup goroutine finishes —
+	// whether successfully or not. WaitForGopls blocks on this channel.
+	goplsDone     chan struct{}
+	goplsDoneOnce sync.Once
 }
 
 // NewGoLanguageProvider creates a GoLanguageProvider that is fully initialised
@@ -72,7 +76,10 @@ func NewGoLanguageProvider(ctx context.Context, repoPath string) (*GoLanguagePro
 		return nil, fmt.Errorf("go language provider: path is not a valid directory: %s", repoPath)
 	}
 
-	p := &GoLanguageProvider{repoPath: repoPath}
+	p := &GoLanguageProvider{
+		repoPath:  repoPath,
+		goplsDone: make(chan struct{}),
+	}
 
 	// Phase 1: load package graph synchronously (fast — in-process).
 	p.ensureLoaded(ctx)
@@ -112,6 +119,18 @@ func (p *GoLanguageProvider) Ready() bool {
 // the LSP initialize handshake has completed successfully.
 func (p *GoLanguageProvider) GoplsReady() bool {
 	return p.goplsReady.Load()
+}
+
+// WaitForGopls blocks until the gopls startup goroutine finishes (success or
+// failure) or until ctx is cancelled. Returns true if gopls is ready.
+// Safe to call from multiple goroutines concurrently.
+func (p *GoLanguageProvider) WaitForGopls(ctx context.Context) bool {
+	select {
+	case <-p.goplsDone:
+		return p.goplsReady.Load()
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // Close stops the gopls subprocess (if running) and releases resources.
@@ -331,6 +350,9 @@ func (p *GoLanguageProvider) ensureLoaded(ctx context.Context) {
 // called as: go p.ensureGoplsLoaded(context.Background())
 func (p *GoLanguageProvider) ensureGoplsLoaded(ctx context.Context) {
 	p.goplsStartOnce.Do(func() {
+		// Signal goplsDone on every exit path so WaitForGopls always unblocks.
+		defer p.goplsDoneOnce.Do(func() { close(p.goplsDone) })
+
 		// Resolve the binary — auto-installs if not found.
 		binary, lim := resolveBinary()
 		if lim != nil {

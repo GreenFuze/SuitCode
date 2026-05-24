@@ -6,18 +6,21 @@ import (
 	"time"
 )
 
-// Warm drives the investigator through readiness levels 1–3. Level 3 requires
-// the Go language provider to be ready; if it is not, the investigator stays at
-// level 2 (heuristic-only scoring).
+// Warm drives the investigator through readiness levels 1–3.
 //
-// Warm is idempotent and safe to call concurrently — subsequent calls return
-// immediately if the investigator is already at the target level.
+// Level 3 requires both the import graph and gopls to be ready. The mutex is
+// released before waiting for gopls so that concurrent feature calls can
+// proceed with Phase-1 data (import graph) during the LSP handshake.
+//
+// Warm is idempotent — subsequent calls return immediately when already at
+// Level 3. It is safe to call concurrently (the idempotent check is guarded
+// by the mutex).
 func (inv *ProjectInvestigator) Warm(ctx context.Context) error {
 	inv.mu.Lock()
-	defer inv.mu.Unlock()
 
 	if inv.readiness >= ReadinessLevel3 {
-		return nil // Already fully warm.
+		inv.mu.Unlock()
+		return nil
 	}
 
 	start := time.Now()
@@ -38,6 +41,7 @@ func (inv *ProjectInvestigator) Warm(ctx context.Context) error {
 	// ── Level 2: full file index ──────────────────────────────────────────────
 	listing, err := inv.fsProvider.ListFiles(ctx)
 	if err != nil {
+		inv.mu.Unlock()
 		return fmt.Errorf("warmup level 2: listing files: %w", err)
 	}
 
@@ -45,23 +49,38 @@ func (inv *ProjectInvestigator) Warm(ctx context.Context) error {
 	inv.readiness = ReadinessLevel2
 	logf("readiness level 2 — file index ready (%d files)", listing.Data.TotalFiles)
 
-	// ── Level 3: import graph (any language provider ready) ──────────────────
-	if inv.multiProvider.HasAnyLanguageProvider() {
+	// ── Level 3: import graph + gopls ─────────────────────────────────────────
+	// Release the lock before waiting for gopls. Feature calls at Level 2 can
+	// proceed with the file index and import graph while the LSP handshake
+	// completes. gopls typically takes 10–30 s; we cap at 90 s.
+	hasLang := inv.multiProvider.HasAnyLanguageProvider()
+	inv.mu.Unlock()
+
+	if hasLang {
+		goplsCtx, goplsCancel := context.WithTimeout(ctx, 90*time.Second)
+		goplsOK := inv.multiProvider.WaitForGopls(goplsCtx)
+		goplsCancel()
+
+		inv.mu.Lock()
 		inv.readiness = ReadinessLevel3
-		if inv.multiProvider.GoplsReady() {
+		if goplsOK {
 			logf("readiness level 3 — package graph + gopls ready")
 		} else {
-			logf("readiness level 3 — package graph ready (gopls still starting)")
+			logf("readiness level 3 — package graph ready (gopls not ready within 90s)")
 		}
+		inv.mu.Unlock()
 	}
 
 	// Record warm timing.
 	elapsed := time.Since(start)
+	inv.mu.Lock()
 	inv.warmDuration = elapsed
 	now := time.Now()
 	inv.lastWarmed = &now
+	readiness := inv.readiness
+	inv.mu.Unlock()
 
-	logf("warmup complete in %dms — readiness: %s", elapsed.Milliseconds(), inv.readiness)
+	logf("warmup complete in %dms — readiness: %s", elapsed.Milliseconds(), readiness)
 	return nil
 }
 
