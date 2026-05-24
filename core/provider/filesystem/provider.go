@@ -98,6 +98,20 @@ var buildSystemMarkers = map[string][]string{
 	"Docker Compose": {"docker-compose.yml", "docker-compose.yaml"},
 }
 
+// deepBuildSystemMarkers detects modern bundlers and build tools that typically
+// live in a subdirectory (e.g. server/frontend/vite.config.ts) rather than
+// at the repo root. These are matched against file names found anywhere in the
+// repo tree.
+var deepBuildSystemMarkers = map[string][]string{
+	"Vite":     {"vite.config.ts", "vite.config.js", "vite.config.mts", "vite.config.mjs"},
+	"Next.js":  {"next.config.js", "next.config.ts", "next.config.mjs"},
+	"Webpack":  {"webpack.config.js", "webpack.config.ts", "webpack.config.mjs"},
+	"Rollup":   {"rollup.config.js", "rollup.config.ts", "rollup.config.mjs"},
+	"Turbo":    {"turbo.json"},
+	"Electron": {"electron-builder.yml", "electron-builder.json"},
+	"Nx":       {"nx.json"},
+}
+
 // testSystemMarkers maps test-framework names to indicator files/patterns at
 // the repository root.
 var testSystemMarkers = map[string][]string{
@@ -109,6 +123,14 @@ var testSystemMarkers = map[string][]string{
 	"PHPUnit": {"phpunit.xml", "phpunit.xml.dist"},
 }
 
+// deepTestSystemMarkers detects test frameworks that store their config outside
+// the repo root (e.g. Playwright configs in a frontend/ subdirectory).
+var deepTestSystemMarkers = map[string][]string{
+	"Playwright": {"playwright.config.ts", "playwright.config.js", "playwright.config.mjs"},
+	"Cypress":    {"cypress.config.ts", "cypress.config.js"},
+	"Vitest":     {"vitest.config.ts", "vitest.config.js"},
+}
+
 // alwaysSkipDirs are directory names that are always excluded from walking.
 var alwaysSkipDirs = map[string]bool{
 	".git":          true,
@@ -118,6 +140,7 @@ var alwaysSkipDirs = map[string]bool{
 	"vendor":        true,
 	".suitcode":     true,
 	".suit":         true,
+	".claude":       true, // Claude Code worktrees/settings — must not be indexed
 	"__pycache__":   true,
 	".mypy_cache":   true,
 	".pytest_cache": true,
@@ -186,6 +209,11 @@ func (p *Provider) ListFiles(ctx context.Context) (*provider.ProviderResult[prov
 	// Collect root-level file names for build/test system detection.
 	rootFiles := make(map[string]bool)
 
+	// anywhereFiles tracks filenames found at any depth in the repo.
+	// Used to detect tools (Vite, Playwright, etc.) that place their config
+	// in a subdirectory rather than the repo root.
+	anywhereFiles := make(map[string]bool)
+
 	walkErr := filepath.WalkDir(p.repoPath, func(path string, d os.DirEntry, err error) error {
 		// Check context cancellation on every entry.
 		select {
@@ -230,6 +258,9 @@ func (p *Provider) ListFiles(ctx context.Context) (*provider.ProviderResult[prov
 			rootFiles[d.Name()] = true
 		}
 
+		// Track all file names (any depth) for deep tool detection.
+		anywhereFiles[d.Name()] = true
+
 		info, statErr := d.Info()
 		if statErr != nil {
 			return nil
@@ -258,8 +289,17 @@ func (p *Provider) ListFiles(ctx context.Context) (*provider.ProviderResult[prov
 		return nil, fmt.Errorf("filesystem provider: walking %q: %w", p.repoPath, walkErr)
 	}
 
+	// Root-level markers (traditional build tools).
 	buildSystems := detectSystems(rootFiles, buildSystemMarkers)
 	testSystems := detectSystems(rootFiles, testSystemMarkers)
+
+	// Deep markers: tools that store configs in subdirectories (Vite, Playwright…).
+	for _, name := range detectSystems(anywhereFiles, deepBuildSystemMarkers) {
+		buildSystems = appendUnique(buildSystems, name)
+	}
+	for _, name := range detectSystems(anywhereFiles, deepTestSystemMarkers) {
+		testSystems = appendUnique(testSystems, name)
+	}
 
 	// Go test is detected by file suffix, not a root-level marker.
 	for _, f := range files {

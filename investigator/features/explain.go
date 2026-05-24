@@ -12,14 +12,54 @@ import (
 	"github.com/GreenFuze/SuitCode/core/provider"
 )
 
+// absPathsToImportRefs converts a slice of absolute file paths (as returned by
+// an ImportGraphProvider) into FileReferences by looking each up in the listing.
+// Paths not found in the index are silently skipped.
+func absPathsToImportRefs(absPaths []string, listing *provider.ProviderResult[provider.FilesystemListing], provSource string) []provider.FileReference {
+	if len(absPaths) == 0 {
+		return nil
+	}
+
+	// Build a lookup map for O(1) access.
+	byPath := make(map[string]provider.FilesystemFile, len(listing.Data.Files))
+	for _, f := range listing.Data.Files {
+		byPath[f.Path] = f
+	}
+
+	var refs []provider.FileReference
+	for _, p := range absPaths {
+		f, ok := byPath[p]
+		if !ok {
+			continue
+		}
+		refs = append(refs, provider.FileReference{
+			Path:     f.Path,
+			RelPath:  f.RelPath,
+			Language: f.Language,
+			Role:     f.Role,
+			Provenance: provider.Provenance{
+				SourceKind:      provider.SourceKindSyntax,
+				SourceTool:      provSource,
+				Authority:       provider.AuthorityHeuristic,
+				EvidenceSummary: fmt.Sprintf("import resolved by language provider from %s", f.RelPath),
+				EvidencePaths:   []string{p},
+			},
+		})
+	}
+	return refs
+}
+
 const defaultExplainBudget = 6_000
 
 // RunExplainFile produces an ExplainFileResponse for the given request.
+// langProv may be nil; when provided it is used to resolve imports for
+// languages the built-in heuristic scanner does not cover (JS/TS, Python).
 func RunExplainFile(
-	_ context.Context,
+	ctx context.Context,
 	req cfeatures.ExplainFileRequest,
 	listing *provider.ProviderResult[provider.FilesystemListing],
 	estimator provider.TokenEstimator,
+	langProv provider.ImportGraphProvider,
 ) (*cfeatures.ExplainFileResponse, error) {
 	if req.FilePath == "" {
 		return nil, fmt.Errorf("explain-file: --path is required")
@@ -47,8 +87,9 @@ func RunExplainFile(
 	fileEst, _ := estimator.EstimateFile(fsFile.Path)
 	resp.FileTokenEstimate = fileEst
 
-	// Parse imports (language-aware, heuristic in v1).
-	imports, limitations := parseImports(fsFile, req.RepoPath)
+	// Parse imports — use the language provider when available, else fall back
+	// to the built-in heuristic scanners.
+	imports, limitations := parseImports(ctx, fsFile, req.RepoPath, listing, langProv)
 	resp.Imports = imports
 	resp.Limitations = limitations
 
@@ -108,27 +149,40 @@ func RunExplainFile(
 // Helpers
 // ──────────────────────────────────────────────────────────────────────────────
 
-// parseImports extracts import paths from a source file using simple text
-// scanning. Returns FileReferences for files that exist in the repository.
-func parseImports(f *provider.FilesystemFile, repoPath string) ([]provider.FileReference, []provider.Limitation) {
-	var refs []provider.FileReference
-	var limitations []provider.Limitation
-
-	switch f.Language {
-	case "Go":
-		refs = parseGoImports(f, repoPath)
-	case "Python":
-		refs = parsePythonImports(f, repoPath)
-	default:
-		// For languages without a parser in v1, return an advisory limitation.
-		limitations = append(limitations, provider.Limitation{
-			Kind:    "no_import_parser",
-			Message: fmt.Sprintf("import parsing not implemented for %s in v1; showing file relationships only", f.Language),
-			Scope:   f.RelPath,
-		})
+// parseImports extracts import paths from a source file. When a language
+// provider is available it is used for JS/TS/Python/Go; otherwise the function
+// falls back to built-in heuristic scanners.
+func parseImports(
+	ctx context.Context,
+	f *provider.FilesystemFile,
+	repoPath string,
+	listing *provider.ProviderResult[provider.FilesystemListing],
+	langProv provider.ImportGraphProvider,
+) ([]provider.FileReference, []provider.Limitation) {
+	// Prefer the import graph provider when available — it's more accurate than
+	// the heuristic scanners below because it uses the full resolved index.
+	if langProv != nil && langProv.Ready() {
+		res, err := langProv.FileImports(ctx, f.Path)
+		if err == nil && res != nil && len(res.Data) > 0 {
+			refs := absPathsToImportRefs(res.Data, listing, "import-graph-provider")
+			return refs, res.Limitations
+		}
 	}
 
-	return refs, limitations
+	// Fall back to built-in heuristic scanners for Go and Python.
+	switch f.Language {
+	case "Go":
+		return parseGoImports(f, repoPath), nil
+	case "Python":
+		return parsePythonImports(f, repoPath), nil
+	default:
+		// No parser available for this language.
+		return nil, []provider.Limitation{{
+			Kind:    "no_import_parser",
+			Message: fmt.Sprintf("import parsing not available for %s (no language provider ready)", f.Language),
+			Scope:   f.RelPath,
+		}}
+	}
 }
 
 // parseGoImports scans a Go file for import blocks and resolves local package

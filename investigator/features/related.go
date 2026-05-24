@@ -13,12 +13,15 @@ import (
 
 const defaultRelatedBudget = 4_000
 
-// RunRelated finds files related to the target using filesystem heuristics.
+// RunRelated finds files related to the target using import graph signals and
+// filesystem heuristics. langProv may be nil; when provided it enriches scoring
+// with direct-import and direct-importer edges (highest accuracy signals).
 func RunRelated(
-	_ context.Context,
+	ctx context.Context,
 	req cfeatures.RelatedRequest,
 	listing *provider.ProviderResult[provider.FilesystemListing],
 	estimator provider.TokenEstimator,
+	langProv provider.ImportGraphProvider,
 ) (*cfeatures.RelatedResponse, error) {
 	if req.FilePath == "" {
 		return nil, fmt.Errorf("related: --path is required")
@@ -47,8 +50,62 @@ func RunRelated(
 		score    float64
 	}
 
+	// ── Import-graph enrichment ───────────────────────────────────────────────
+	//
+	// When a language provider is available, pre-compute the set of files that
+	// are directly imported by this file (forward edges) and files that directly
+	// import this file (reverse edges). These are the highest-confidence signals
+	// and are scored above all filesystem heuristics.
+
+	importedAbsPaths := make(map[string]bool)
+	importerAbsPaths := make(map[string]bool)
+
+	if langProv != nil {
+		seedAbs := fsFile.Path
+
+		if res, err := langProv.FileImports(ctx, seedAbs); err == nil {
+			for _, p := range res.Data {
+				importedAbsPaths[p] = true
+			}
+		}
+		if res, err := langProv.FileImporters(ctx, seedAbs); err == nil {
+			for _, p := range res.Data {
+				importerAbsPaths[p] = true
+			}
+		}
+	}
+
 	seen := make(map[string]bool)
 	var candidates []candidate
+
+	// 0. Import-graph edges — highest confidence signals.
+	for _, f := range listing.Data.Files {
+		if f.RelPath == fsFile.RelPath {
+			continue
+		}
+
+		if importedAbsPaths[f.Path] {
+			if !seen[f.RelPath] {
+				seen[f.RelPath] = true
+				candidates = append(candidates, candidate{
+					f,
+					cfeatures.RelationImports,
+					"directly imported by this file (import graph)",
+					0.92,
+				})
+			}
+		} else if importerAbsPaths[f.Path] {
+			if !seen[f.RelPath] {
+				seen[f.RelPath] = true
+				candidates = append(candidates, candidate{
+					f,
+					cfeatures.RelationImportedBy,
+					"directly imports this file (import graph)",
+					0.88,
+				})
+			}
+		}
+	}
 
 	// 1. Test files for this source (or source files for a test).
 	testFiles := testFilesForSource(listing, fsFile.RelPath)
@@ -102,17 +159,16 @@ func RunRelated(
 		return candidates[i].score > candidates[j].score
 	})
 
-	// Apply budget: include files until token budget is used.
+	// Apply budget: include candidates that fit within the token budget.
+	// We use continue (not break) so that a single large file cannot exclude
+	// all subsequent smaller, high-value candidates.
 	tokenUsed := 0
+	budgetReached := false
 	for _, c := range candidates {
 		est, _ := estimator.EstimateFile(c.file.Path)
 		if budget > 0 && tokenUsed+est.Tokens > budget {
-			resp.Limitations = append(resp.Limitations, provider.Limitation{
-				Kind:    "budget_reached",
-				Message: fmt.Sprintf("stopped after %d tokens; remaining candidates excluded", tokenUsed),
-				Scope:   "related_files",
-			})
-			break
+			budgetReached = true
+			continue // skip this candidate but keep checking smaller ones
 		}
 		tokenUsed += est.Tokens
 
@@ -125,6 +181,14 @@ func RunRelated(
 			Reason:     c.reason,
 			Provenance: prov,
 			Confidence: c.score,
+		})
+	}
+
+	if budgetReached {
+		resp.Limitations = append(resp.Limitations, provider.Limitation{
+			Kind:    "budget_reached",
+			Message: fmt.Sprintf("some candidates excluded — budget %d tokens used; large files skipped", tokenUsed),
+			Scope:   "related_files",
 		})
 	}
 

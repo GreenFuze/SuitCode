@@ -18,6 +18,7 @@ import (
 	"github.com/GreenFuze/SuitCode/core/provider/filesystem"
 	goprovider "github.com/GreenFuze/SuitCode/core/provider/language/go"
 	jsprovider "github.com/GreenFuze/SuitCode/core/provider/language/js"
+	multiprovider "github.com/GreenFuze/SuitCode/core/provider/language/multi"
 	pyprovider "github.com/GreenFuze/SuitCode/core/provider/language/python"
 	"github.com/GreenFuze/SuitCode/core/provider/vcs"
 	"github.com/GreenFuze/SuitCode/investigator/artifacts"
@@ -80,9 +81,14 @@ type ProjectInvestigator struct {
 	// Providers
 	fsProvider   *filesystem.Provider
 	vcsProvider  *vcs.Provider
-	langProvider *goprovider.GoLanguageProvider    // nil if not a Go module or load failed
-	jsProvider   *jsprovider.JSLanguageProvider    // nil if no JS/TS files found
+	langProvider *goprovider.GoLanguageProvider     // nil if not a Go module or load failed
+	jsProvider   *jsprovider.JSLanguageProvider     // nil if no JS/TS files found
 	pyProvider   *pyprovider.PythonLanguageProvider // nil if no Python files found
+
+	// multiProvider is the composite of all ready language providers.
+	// Feature handlers use this instead of picking a single active provider,
+	// so polyglot repositories benefit from all applicable providers simultaneously.
+	multiProvider *multiprovider.MultiLangProvider
 
 	// Cached file listing (populated during Warm).
 	mu           sync.RWMutex
@@ -166,20 +172,26 @@ func NewProjectInvestigator(ctx context.Context, repoPath string) (*ProjectInves
 		)
 	}
 
+	// Build the composite language provider from all ready individual providers.
+	// The order in which providers are passed does not affect correctness; each
+	// provider only returns results for files it understands.
+	multiP := multiprovider.New(langP, jsP, pyP)
+
 	// Call logger: non-fatal.
 	clog, _ := calllog.New(absPath)
 
 	inv := &ProjectInvestigator{
-		repoPath:     absPath,
-		cfg:          cfg,
-		estimator:    provider.NewHeuristicEstimator(),
-		fsProvider:   fsP,
-		vcsProvider:  vcsP,
-		langProvider: langP,
-		jsProvider:   jsP,
-		pyProvider:   pyP,
-		store:        store,
-		callLogger:   clog,
+		repoPath:      absPath,
+		cfg:           cfg,
+		estimator:     provider.NewHeuristicEstimator(),
+		fsProvider:    fsP,
+		vcsProvider:   vcsP,
+		langProvider:  langP,
+		jsProvider:    jsP,
+		pyProvider:    pyP,
+		multiProvider: multiP,
+		store:         store,
+		callLogger:    clog,
 	}
 
 	return inv, nil
@@ -366,7 +378,7 @@ func (inv *ProjectInvestigator) ExplainFile(ctx context.Context, req cfeatures.E
 	if err != nil {
 		return nil, fmt.Errorf("explain-file: %w", err)
 	}
-	resp, err := invfeatures.RunExplainFile(ctx, req, listing, inv.estimator)
+	resp, err := invfeatures.RunExplainFile(ctx, req, listing, inv.estimator, inv.multiProvider)
 	if err != nil {
 		return nil, err
 	}
@@ -385,7 +397,7 @@ func (inv *ProjectInvestigator) Related(ctx context.Context, req cfeatures.Relat
 	if err != nil {
 		return nil, fmt.Errorf("related: %w", err)
 	}
-	resp, err := invfeatures.RunRelated(ctx, req, listing, inv.estimator)
+	resp, err := invfeatures.RunRelated(ctx, req, listing, inv.estimator, inv.multiProvider)
 	if err != nil {
 		return nil, err
 	}
@@ -404,7 +416,7 @@ func (inv *ProjectInvestigator) Tests(ctx context.Context, req cfeatures.TestsRe
 	if err != nil {
 		return nil, fmt.Errorf("tests: %w", err)
 	}
-	resp, err := invfeatures.RunTests(ctx, req, listing, inv.estimator)
+	resp, err := invfeatures.RunTests(ctx, req, listing, inv.estimator, inv.multiProvider)
 	if err != nil {
 		return nil, err
 	}
@@ -453,10 +465,7 @@ func (inv *ProjectInvestigator) Context(ctx context.Context, req cfeatures.Conte
 		return nil, fmt.Errorf("context: %w", err)
 	}
 
-	// Select the best available language provider for this request.
-	langProv := inv.activeLangProvider()
-
-	resp, err := invfeatures.RunContext(ctx, req, listing, inv.estimator, langProv)
+	resp, err := invfeatures.RunContext(ctx, req, listing, inv.estimator, inv.multiProvider)
 	if err != nil {
 		return nil, err
 	}
@@ -482,10 +491,7 @@ func (inv *ProjectInvestigator) FailureContext(ctx context.Context, req cfeature
 		return nil, fmt.Errorf("failure-context: %w", err)
 	}
 
-	// Select the best available language provider for this request.
-	langProv := inv.activeLangProvider()
-
-	resp, err := invfeatures.RunFailureContext(ctx, req, listing, inv.estimator, langProv)
+	resp, err := invfeatures.RunFailureContext(ctx, req, listing, inv.estimator, inv.multiProvider)
 	if err != nil {
 		return nil, err
 	}
@@ -525,22 +531,6 @@ func (inv *ProjectInvestigator) VerifyPlan(ctx context.Context, req cfeatures.Ve
 		LatencyMs:       resp.Metrics.Timing.DurationMs,
 	})
 	return resp, nil
-}
-
-// activeLangProvider returns the best available ImportGraphProvider, preferring
-// Go (tool-backed, highest accuracy) over JS/TS and Python (heuristic).
-// Returns nil when no language provider is ready.
-func (inv *ProjectInvestigator) activeLangProvider() provider.ImportGraphProvider {
-	if inv.langProvider != nil {
-		return inv.langProvider
-	}
-	if inv.jsProvider != nil {
-		return inv.jsProvider
-	}
-	if inv.pyProvider != nil {
-		return inv.pyProvider
-	}
-	return nil
 }
 
 // GoplsReady reports whether the gopls subprocess has been started and is ready

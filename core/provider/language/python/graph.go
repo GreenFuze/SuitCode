@@ -31,18 +31,19 @@ type pyImportIndex struct {
 
 // Directories to skip when walking the repo.
 var pySkipDirs = map[string]bool{
-	".git":        true,
-	"__pycache__": true,
-	".venv":       true,
-	"venv":        true,
-	"env":         true,
-	".env":        true,
-	".tox":        true,
-	"dist":        true,
-	"build":       true,
+	".git":          true,
+	".claude":       true, // Claude Code worktrees — must not be indexed
+	"__pycache__":   true,
+	".venv":         true,
+	"venv":          true,
+	"env":           true,
+	".env":          true,
+	".tox":          true,
+	"dist":          true,
+	"build":         true,
 	".pytest_cache": true,
 	"site-packages": true,
-	"node_modules": true,
+	"node_modules":  true,
 }
 
 var (

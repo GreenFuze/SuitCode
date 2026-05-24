@@ -14,11 +14,14 @@ import (
 const defaultTestsBudget = 4_000
 
 // RunTests finds tests relevant to the given source file or change.
+// langProv may be nil; when provided, test files that directly import the target
+// source file are given the highest confidence score.
 func RunTests(
-	_ context.Context,
+	ctx context.Context,
 	req cfeatures.TestsRequest,
 	listing *provider.ProviderResult[provider.FilesystemListing],
 	estimator provider.TokenEstimator,
+	langProv provider.ImportGraphProvider,
 ) (*cfeatures.TestsResponse, error) {
 	if req.FilePath == "" && req.DiffRef == "" {
 		return nil, fmt.Errorf("tests: --path or --from is required")
@@ -66,8 +69,8 @@ func RunTests(
 
 	// Score each test file by proximity to the source file.
 	type scored struct {
-		file  provider.FilesystemFile
-		score float64
+		file   provider.FilesystemFile
+		score  float64
 		reason string
 	}
 
@@ -77,18 +80,38 @@ func RunTests(
 	targetStem := strings.ToLower(strings.TrimSuffix(filepath.Base(fsFile.RelPath),
 		filepath.Ext(fsFile.RelPath)))
 
+	// Pre-compute the set of test files that directly import the target file via
+	// the import graph (highest-confidence signal).
+	testImporters := make(map[string]bool)
+	if langProv != nil {
+		if res, err := langProv.FileImporters(ctx, fsFile.Path); err == nil {
+			for _, p := range res.Data {
+				testImporters[p] = true
+			}
+		}
+	}
+
 	for _, tf := range allTestFiles {
 		testDir := filepath.ToSlash(filepath.Dir(tf.RelPath))
 		testBase := strings.ToLower(filepath.Base(tf.RelPath))
-		testStem := strings.TrimSuffix(testBase, filepath.Ext(testBase))
-		testStem = strings.TrimSuffix(testStem, "_test")
-		testStem = strings.TrimPrefix(testStem, "test_")
+
+		// Strip file extension, then also strip common test suffixes/prefixes so
+		// "game.spec.ts" → "game" and "test_utils.py" → "utils".
+		testStem := strings.TrimSuffix(testBase, filepath.Ext(testBase)) // "game.spec"
+		testStem = strings.TrimSuffix(testStem, ".spec")                 // "game"
+		testStem = strings.TrimSuffix(testStem, ".test")                 // (no-op here)
+		testStem = strings.TrimSuffix(testStem, "_test")                 // Go convention
+		testStem = strings.TrimPrefix(testStem, "test_")                 // Python convention
 
 		var score float64
 		var reason string
 
-		// Direct name match (e.g. foo_test.go for foo.go).
-		if testStem == targetStem {
+		// Import-graph match — test file directly imports the source.
+		if testImporters[tf.Path] {
+			score = 0.97
+			reason = "test file directly imports this source file (import graph)"
+		} else if testStem == targetStem {
+			// Direct name match (e.g. foo_test.go → foo.go, App.spec.tsx → App.tsx).
 			score = 0.95
 			reason = "test file name directly matches source file"
 		} else if testDir == targetDir {
