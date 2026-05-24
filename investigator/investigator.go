@@ -297,6 +297,23 @@ func (inv *ProjectInvestigator) Status() InvestigatorStatus {
 		})
 	}
 
+	// C# language provider (csproj ProjectReference graph + Avalonia pair detection).
+	if inv.multiProvider.CSReady() {
+		status.Providers = append(status.Providers, ProviderStatus{
+			ProviderID:  "csharp-language",
+			DisplayName: "C# Language Provider (csproj ProjectReference graph + Avalonia)",
+			Ready:       true,
+			Summary:     "ProjectReference graph loaded — authoritative project-level dependency graph",
+		})
+	} else {
+		status.Providers = append(status.Providers, ProviderStatus{
+			ProviderID:  "csharp-language",
+			DisplayName: "C# Language Provider (csproj ProjectReference graph + Avalonia)",
+			Ready:       false,
+			Summary:     "not ready (no .csproj files found)",
+		})
+	}
+
 	return status
 }
 

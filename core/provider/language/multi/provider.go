@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/GreenFuze/SuitCode/core/provider"
+	csprovider "github.com/GreenFuze/SuitCode/core/provider/language/csharp"
 	goprovider "github.com/GreenFuze/SuitCode/core/provider/language/go"
 	jsprovider "github.com/GreenFuze/SuitCode/core/provider/language/js"
 	pyprovider "github.com/GreenFuze/SuitCode/core/provider/language/python"
@@ -35,6 +36,7 @@ type MultiLangProvider struct {
 	goProvider *goprovider.GoLanguageProvider
 	jsProvider *jsprovider.JSLanguageProvider
 	pyProvider *pyprovider.PythonLanguageProvider
+	csProvider *csprovider.CSHarpLanguageProvider
 
 	// active is the internal dispatch slice built from the non-nil providers
 	// above. It is an implementation detail — not an externally supplied list.
@@ -81,6 +83,16 @@ func NewMultiLangProvider(ctx context.Context, repoPath string) *MultiLangProvid
 		}
 	}
 
+	// ── C# provider (csproj ProjectReference graph + Avalonia pair detection) ─
+	if csP, err := csprovider.NewCSHarpLanguageProvider(ctx, repoPath); err == nil {
+		if csP.Ready() {
+			m.csProvider = csP
+			m.active = append(m.active, csP)
+		} else {
+			_ = csP.Close()
+		}
+	}
+
 	return m
 }
 
@@ -114,6 +126,11 @@ func (m *MultiLangProvider) JSReady() bool {
 // PyReady reports whether the Python import graph is ready.
 func (m *MultiLangProvider) PyReady() bool {
 	return m.pyProvider != nil && m.pyProvider.Ready()
+}
+
+// CSReady reports whether the C# import graph (csproj ProjectReference graph) is ready.
+func (m *MultiLangProvider) CSReady() bool {
+	return m.csProvider != nil && m.csProvider.Ready()
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -164,6 +181,11 @@ func (m *MultiLangProvider) Close() error {
 	if m.pyProvider != nil {
 		if err := m.pyProvider.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("python provider: %w", err))
+		}
+	}
+	if m.csProvider != nil {
+		if err := m.csProvider.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("csharp provider: %w", err))
 		}
 	}
 
