@@ -160,7 +160,7 @@ func GoProviderSymbolScenarios(_ string) []EvalScenario {
 // SmokeScenarios returns the smoke suite — a minimal set of checks that
 // verify the investigator produces valid, deterministic, budget-compliant
 // output. All scenarios run against the repository at repoPath.
-func SmokeScenarios(repoPath string) []EvalScenario {
+func SmokeScenarios(_ string) []EvalScenario {
 	return []EvalScenario{
 		{
 			ID:          "smoke-repo-overview-determinism",
@@ -202,7 +202,7 @@ func SmokeScenarios(repoPath string) []EvalScenario {
 
 // ContextReductionScenarios returns scenarios that measure the core product
 // metric: how effectively SuitCode reduces context for a caller.
-func ContextReductionScenarios(repoPath string) []EvalScenario {
+func ContextReductionScenarios(_ string) []EvalScenario {
 	return []EvalScenario{
 		{
 			ID:          "ctxred-context-compression",

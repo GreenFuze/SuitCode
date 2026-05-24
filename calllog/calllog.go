@@ -281,10 +281,6 @@ func (l *Logger) PrintAggregateSummary(w io.Writer, last int) error {
 	}
 
 	// Aggregate by feature in insertion order (use a slice to preserve order).
-	type featureEntry struct {
-		name string
-		stat *featureStat
-	}
 	orderSeen := make([]string, 0, 8)
 	statMap := make(map[string]*featureStat, 8)
 
@@ -352,40 +348,12 @@ func (l *Logger) PrintAggregateSummary(w io.Writer, last int) error {
 
 	// Per-feature rows.
 	for _, name := range orderSeen {
-		s := statMap[name]
-		avgMs := "-"
-		if s.calls > 0 {
-			avgMs = fmt.Sprintf("%d", s.totalMs/int64(s.calls))
-		}
-		avgTok := "-"
-		if s.tokCalls > 0 {
-			avgTok = formatThousands(int(s.totalTok / int64(s.tokCalls)))
-		}
-		avgRatio := "-"
-		if s.ratioCalls > 0 {
-			avgRatio = fmt.Sprintf("%.1f×", s.ratioSum/float64(s.ratioCalls))
-		}
-		fmt.Fprintf(w, "  %-18s  %5d  %5d  %5d  %7s  %8s  %7s\n",
-			name, s.calls, s.errors, s.warnings, avgMs, avgTok, avgRatio)
+		printStatRow(w, name, statMap[name])
 	}
 
 	// Totals row.
 	fmt.Fprintln(w, " "+div)
-	avgMsTot := "-"
-	if totals.calls > 0 {
-		avgMsTot = fmt.Sprintf("%d", totals.totalMs/int64(totals.calls))
-	}
-	avgTokTot := "-"
-	if totals.tokCalls > 0 {
-		avgTokTot = formatThousands(int(totals.totalTok / int64(totals.tokCalls)))
-	}
-	avgRatioTot := "-"
-	if totals.ratioCalls > 0 {
-		avgRatioTot = fmt.Sprintf("%.1f×", totals.ratioSum/float64(totals.ratioCalls))
-	}
-	fmt.Fprintf(w, "  %-18s  %5d  %5d  %5d  %7s  %8s  %7s\n",
-		"totals", totals.calls, totals.errors, totals.warnings,
-		avgMsTot, avgTokTot, avgRatioTot)
+	printStatRow(w, "totals", totals)
 
 	// Problems section — only shown when there are errors or warnings.
 	if totals.errors > 0 || totals.warnings > 0 {
@@ -408,6 +376,28 @@ func (l *Logger) PrintAggregateSummary(w io.Writer, last int) error {
 	fmt.Fprintln(w, bar)
 	fmt.Fprintf(w, "  source: %s\n", l.path)
 	return nil
+}
+
+// printStatRow writes one summary table row for the given label and stat block.
+// Used for both per-feature rows and the totals row to keep formatting identical.
+func printStatRow(w io.Writer, label string, s *featureStat) {
+	avgMs := "-"
+	if s.calls > 0 {
+		avgMs = fmt.Sprintf("%d", s.totalMs/int64(s.calls))
+	}
+
+	avgTok := "-"
+	if s.tokCalls > 0 {
+		avgTok = formatThousands(int(s.totalTok / int64(s.tokCalls)))
+	}
+
+	avgRatio := "-"
+	if s.ratioCalls > 0 {
+		avgRatio = fmt.Sprintf("%.1f×", s.ratioSum/float64(s.ratioCalls))
+	}
+
+	fmt.Fprintf(w, "  %-18s  %5d  %5d  %5d  %7s  %8s  %7s\n",
+		label, s.calls, s.errors, s.warnings, avgMs, avgTok, avgRatio)
 }
 
 // formatDuration formats a duration as a human-readable string ("2h 3m", "45m", "30s").
