@@ -58,16 +58,22 @@ var (
 	reRequire = regexp.MustCompile(`require\s*\(\s*['"]([.@~#][^'"]+)['"]\s*\)`)
 
 	// Re-exports: export { X } from './module', export * from '@/module'
-	reExportFrom = regexp.MustCompile(`(?m)^\s*export\s+(?:\*|\{[^}]*\})\s+from\s+['"]([.@~#][^'"]+)['"]`)
+	// Also matches: export type { X } from './module'
+	reExportFrom = regexp.MustCompile(`(?m)^\s*export\s+(?:type\s+)?(?:\*|\{[^}]*\})\s+from\s+['"]([.@~#][^'"]+)['"]`)
+
+	// Dynamic import(): await import('./module'), import('@/module').then(...)
+	// Not anchored to line-start since it often appears mid-expression.
+	reImportDynamic = regexp.MustCompile(`\bimport\s*\(\s*['"]([.@~#][^'"]+)['"]\s*\)`)
 )
 
 // buildImportGraph walks repoPath, parses JS/TS source files, and builds the
-// bidirectional import graph. Relative imports and tsconfig path-alias imports
-// are both resolved; bare specifiers (npm packages) are ignored.
+// bidirectional import graph. Relative imports, dynamic imports, tsconfig
+// path-alias imports, and baseUrl-relative imports are all resolved; bare
+// specifiers (npm packages) are ignored.
 func buildImportGraph(repoPath string) (*jsImportIndex, []provider.Limitation, error) {
-	// Load tsconfig path aliases once for the whole repo walk.
-	// This enables resolution of "@/*", "~/*", and other non-relative imports.
-	aliases := loadAllTSConfigAliases(repoPath)
+	// Load tsconfig path aliases and baseUrl directories once for the whole
+	// repo walk, following any "extends" chains.
+	aliases, baseURLs := loadAllTSConfigs(repoPath)
 
 	// Collect all JS/TS source files, excluding generated/vendor directories.
 	var sourceFiles []string
@@ -117,7 +123,7 @@ func buildImportGraph(repoPath string) (*jsImportIndex, []provider.Limitation, e
 
 		var resolved []string
 		for _, spec := range specifiers {
-			if target := resolveSpecifier(src, spec, repoPath, aliases); target != "" {
+			if target := resolveSpecifier(src, spec, repoPath, aliases, baseURLs); target != "" {
 				resolved = append(resolved, target)
 				idx.fileImporters[target] = append(idx.fileImporters[target], src)
 			}
@@ -171,7 +177,7 @@ func parseImportSpecifiers(filePath string) ([]string, *provider.Limitation) {
 	seen := make(map[string]bool)
 	var specifiers []string
 
-	for _, re := range []*regexp.Regexp{reImportFrom, reRequire, reExportFrom} {
+	for _, re := range []*regexp.Regexp{reImportFrom, reRequire, reExportFrom, reImportDynamic} {
 		for _, m := range re.FindAllSubmatch(data, -1) {
 			if len(m) >= 2 {
 				spec := string(m[1])
@@ -189,32 +195,41 @@ func parseImportSpecifiers(filePath string) ([]string, *provider.Limitation) {
 // resolveSpecifier resolves an import specifier from fromFile and returns the
 // absolute path of the target file. Returns "" when the target cannot be found.
 //
-// Two resolution strategies are applied in order:
+// Three resolution strategies are applied in order:
 //  1. Relative specifiers (starting with "."): resolved relative to fromFile's directory.
 //  2. Alias specifiers (e.g. "@/foo"): expanded via tsconfig path aliases then probed.
+//  3. baseUrl-relative specifiers: tried against each known tsconfig baseUrl directory.
+//     This handles `import 'api/contracts'` when tsconfig has baseUrl set to "./src".
 //
-// Bare specifiers ("react", "lodash") always return "".
-func resolveSpecifier(fromFile, specifier, repoPath string, aliases tsConfigAliases) string {
-	var candidate string
-
+// Bare npm package names ("react", "lodash") that don't resolve under any
+// baseUrl are silently dropped.
+func resolveSpecifier(fromFile, specifier, repoPath string, aliases tsConfigAliases, baseURLs []string) string {
 	if strings.HasPrefix(specifier, ".") {
 		// Relative import — resolve from the file's own directory.
 		base := filepath.Dir(fromFile)
-		candidate = filepath.Clean(filepath.Join(base, filepath.FromSlash(specifier)))
-	} else {
-		// Non-relative — try tsconfig alias expansion.
-		// If no alias matches, this is a bare npm package name; skip it.
-		if len(aliases) == 0 {
-			return ""
-		}
-		expanded := aliases.resolve(specifier)
-		if expanded == "" {
-			return ""
-		}
-		candidate = expanded
+		candidate := filepath.Clean(filepath.Join(base, filepath.FromSlash(specifier)))
+		return probeCandidate(candidate, repoPath)
 	}
 
-	return probeCandidate(candidate, repoPath)
+	// Non-relative: try tsconfig alias expansion first.
+	if len(aliases) > 0 {
+		if expanded := aliases.resolve(specifier); expanded != "" {
+			return probeCandidate(expanded, repoPath)
+		}
+	}
+
+	// Fall back to baseUrl-relative resolution. Each known baseUrl directory
+	// is tried in order. This handles TypeScript projects that omit path
+	// aliases but set baseUrl, allowing `import 'utils/helpers'` to resolve
+	// to `{baseUrl}/utils/helpers.ts`.
+	for _, baseURL := range baseURLs {
+		candidate := filepath.Join(baseURL, filepath.FromSlash(specifier))
+		if result := probeCandidate(candidate, repoPath); result != "" {
+			return result
+		}
+	}
+
+	return ""
 }
 
 // probeCandidate checks whether candidate (which may lack an extension) resolves

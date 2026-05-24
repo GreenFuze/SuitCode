@@ -43,18 +43,21 @@ var reLineComment = regexp.MustCompile(`(?m)//[^\r\n]*`)
 
 // tsConfigJSON is the minimal structure we need from tsconfig.json.
 type tsConfigJSON struct {
+	Extends         string `json:"extends"`
 	CompilerOptions struct {
 		BaseURL string              `json:"baseUrl"`
 		Paths   map[string][]string `json:"paths"`
 	} `json:"compilerOptions"`
 }
 
-// loadAllTSConfigAliases walks repoPath looking for tsconfig.json files and
-// returns the merged set of alias entries from all of them.
-// Directories in skipDirs (node_modules, dist, etc.) and paths deeper than
-// 6 levels are skipped to keep the search bounded.
-func loadAllTSConfigAliases(repoPath string) tsConfigAliases {
-	var all tsConfigAliases
+// loadAllTSConfigs walks repoPath looking for tsconfig.json files and returns
+// the merged aliases and baseURL directories from all of them (including any
+// configs they extend). Directories in skipDirs and paths deeper than 6
+// levels are skipped to keep the search bounded.
+func loadAllTSConfigs(repoPath string) (tsConfigAliases, []string) {
+	var allAliases tsConfigAliases
+	var allBaseURLs []string
+	visited := make(map[string]bool)
 
 	_ = filepath.WalkDir(repoPath, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -62,12 +65,9 @@ func loadAllTSConfigAliases(repoPath string) tsConfigAliases {
 		}
 
 		if d.IsDir() {
-			// Respect the same skip list as the import graph walker.
 			if skipDirs[d.Name()] {
 				return filepath.SkipDir
 			}
-
-			// Don't recurse beyond 6 directory levels to stay fast.
 			rel, _ := filepath.Rel(repoPath, path)
 			if strings.Count(filepath.ToSlash(rel), "/") >= 6 {
 				return filepath.SkipDir
@@ -79,19 +79,53 @@ func loadAllTSConfigAliases(repoPath string) tsConfigAliases {
 			return nil
 		}
 
-		all = append(all, parseTSConfigAliases(path, repoPath)...)
+		aliases, baseURLs := parseTSConfigChain(path, repoPath, visited)
+		allAliases = append(allAliases, aliases...)
+		allBaseURLs = append(allBaseURLs, baseURLs...)
 		return nil
 	})
 
-	return all
+	return allAliases, allBaseURLs
 }
 
-// parseTSConfigAliases reads and parses a single tsconfig.json file and
-// returns its alias entries with all paths resolved to absolute locations.
-func parseTSConfigAliases(tsconfigPath, repoPath string) tsConfigAliases {
+// parseTSConfigChain parses a tsconfig.json and any configs it extends,
+// returning the merged aliases and baseURL directories. visited prevents
+// infinite loops from circular extends.
+func parseTSConfigChain(tsconfigPath, repoPath string, visited map[string]bool) (tsConfigAliases, []string) {
+	abs, err := filepath.Abs(tsconfigPath)
+	if err != nil || visited[abs] {
+		return nil, nil
+	}
+	visited[abs] = true
+
+	aliases, baseURL, extendsPath := parseTSConfigFile(abs, repoPath)
+
+	// Recurse into extended config first so that the child's settings take
+	// precedence (they are appended last and checked first by resolve()).
+	var parentAliases tsConfigAliases
+	var parentBaseURLs []string
+	if extendsPath != "" {
+		parentAliases, parentBaseURLs = parseTSConfigChain(extendsPath, repoPath, visited)
+	}
+
+	var baseURLs []string
+	if baseURL != "" {
+		baseURLs = append(parentBaseURLs, baseURL)
+	} else {
+		baseURLs = parentBaseURLs
+	}
+
+	return append(parentAliases, aliases...), baseURLs
+}
+
+// parseTSConfigFile reads one tsconfig.json and returns:
+//   - its path aliases resolved to absolute paths,
+//   - the resolved absolute baseUrl directory (empty string if not set),
+//   - the resolved absolute path of any "extends" target (empty string if none).
+func parseTSConfigFile(tsconfigPath, repoPath string) (tsConfigAliases, string, string) {
 	data, err := os.ReadFile(tsconfigPath)
 	if err != nil {
-		return nil
+		return nil, "", ""
 	}
 
 	// Strip single-line comments to handle JSONC-formatted tsconfig files.
@@ -99,18 +133,42 @@ func parseTSConfigAliases(tsconfigPath, repoPath string) tsConfigAliases {
 
 	var cfg tsConfigJSON
 	if err := json.Unmarshal(clean, &cfg); err != nil {
-		return nil
+		return nil, "", ""
+	}
+
+	tsconfigDir := filepath.Dir(tsconfigPath)
+
+	// Resolve baseUrl relative to the tsconfig.json's own directory.
+	absBaseURL := ""
+	if cfg.CompilerOptions.BaseURL != "" {
+		absBaseURL = filepath.Clean(filepath.Join(tsconfigDir, filepath.FromSlash(cfg.CompilerOptions.BaseURL)))
+		if !isUnderRepo(absBaseURL, repoPath) {
+			absBaseURL = ""
+		}
+	}
+
+	// Resolve "extends" relative to the tsconfig.json's own directory.
+	extendsPath := ""
+	if cfg.Extends != "" {
+		candidate := filepath.Clean(filepath.Join(tsconfigDir, filepath.FromSlash(cfg.Extends)))
+		// extends may or may not include the .json extension.
+		if !strings.HasSuffix(strings.ToLower(candidate), ".json") {
+			candidate += ".json"
+		}
+		if isUnderRepo(candidate, repoPath) {
+			extendsPath = candidate
+		}
 	}
 
 	if len(cfg.CompilerOptions.Paths) == 0 {
-		return nil
+		return nil, absBaseURL, extendsPath
 	}
 
-	// Resolve baseUrl relative to the tsconfig.json's own directory.
-	tsconfigDir := filepath.Dir(tsconfigPath)
-	baseURL := tsconfigDir
-	if cfg.CompilerOptions.BaseURL != "" {
-		baseURL = filepath.Clean(filepath.Join(tsconfigDir, filepath.FromSlash(cfg.CompilerOptions.BaseURL)))
+	// Use baseUrl as the base for resolving path values; fall back to the
+	// tsconfig's own directory if baseUrl is not set.
+	pathBase := tsconfigDir
+	if absBaseURL != "" {
+		pathBase = absBaseURL
 	}
 
 	var result tsConfigAliases
@@ -130,12 +188,10 @@ func parseTSConfigAliases(tsconfigPath, repoPath string) tsConfigAliases {
 
 		if keyHasWild && valHasWild {
 			// Wildcard alias: "@/*" → ["./src/*"]
-			// prefix becomes "@/" (key without the trailing "*").
 			prefix := strings.TrimSuffix(key, "*") // "@/"
 			valBase := strings.TrimSuffix(value, "/*")
-			absBase := filepath.Clean(filepath.Join(baseURL, filepath.FromSlash(valBase)))
+			absBase := filepath.Clean(filepath.Join(pathBase, filepath.FromSlash(valBase)))
 
-			// Guard: the resolved directory must still be inside the repo.
 			if !isUnderRepo(absBase, repoPath) {
 				continue
 			}
@@ -146,7 +202,7 @@ func parseTSConfigAliases(tsconfigPath, repoPath string) tsConfigAliases {
 			})
 		} else if !keyHasWild {
 			// Exact alias: "@utils" → ["./src/utils/index"]
-			absTarget := filepath.Clean(filepath.Join(baseURL, filepath.FromSlash(value)))
+			absTarget := filepath.Clean(filepath.Join(pathBase, filepath.FromSlash(value)))
 			result = append(result, tsConfigAlias{
 				prefix:      key,
 				exact:       true,
@@ -157,7 +213,7 @@ func parseTSConfigAliases(tsconfigPath, repoPath string) tsConfigAliases {
 		// ambiguous; skip.
 	}
 
-	return result
+	return result, absBaseURL, extendsPath
 }
 
 // resolve tries to expand specifier against the alias entries.
