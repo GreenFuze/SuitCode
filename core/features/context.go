@@ -62,9 +62,38 @@ type ContextCapsule struct {
 	CompressionRatio float64
 }
 
+// ContextFileEntry is a flat, agent-friendly view of a single file selected into
+// the context capsule. Agents should iterate Files rather than navigating the
+// nested Capsule.Facts structure.
+type ContextFileEntry struct {
+	// Path is the absolute path on disk.
+	Path string
+	// RelPath is the path relative to the repository root.
+	RelPath string
+	// Language is the detected programming language.
+	Language string
+	// Role is the file role: "source", "test", "generated", etc.
+	Role string
+	// TokenEstimate is the approximate token cost of the file content.
+	TokenEstimate int
+	// Rank is 1-based position in the ranked selection (lower = more relevant).
+	Rank int
+	// Score is the 0–1 relevance score assigned to this file.
+	Score float64
+	// Reason explains why this file was included.
+	Reason string
+	// Content is the full text of the file as included in the capsule.
+	Content string
+}
+
 // ContextResponse is the structured result of a context run.
 type ContextResponse struct {
 	BaseFeatureResponse
+
+	// Files is a flat, agent-friendly list of files selected into the capsule,
+	// ordered by relevance rank. Each entry includes the file content. This is
+	// the primary field agents should use — no nested traversal required.
+	Files []ContextFileEntry
 
 	Capsule ContextCapsule
 
@@ -73,7 +102,7 @@ type ContextResponse struct {
 	FilesExcluded   int
 
 	// EvidenceScanned is the token-equivalent of all candidates examined.
-	EvidenceScanned         provider.TokenEstimate
+	EvidenceScanned provider.TokenEstimate
 	// EstimatedContextAvoided = EvidenceScanned - Capsule.TotalEstimate.
 	EstimatedContextAvoided provider.TokenEstimate
 	// CompressionRatio mirrors Capsule.CompressionRatio for easy access.

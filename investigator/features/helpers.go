@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -154,6 +155,21 @@ func findFile(listing *provider.ProviderResult[provider.FilesystemListing], targ
 	}
 	rel, _ := filepath.Rel(repoPath, abs)
 	rel = filepath.ToSlash(rel)
+
+	// Give a clear, actionable error when the caller passed a directory.
+	if info, statErr := os.Stat(abs); statErr == nil && info.IsDir() {
+		var suggestions []string
+		for _, f := range listing.Data.Files {
+			if filepath.Dir(f.Path) == abs && len(suggestions) < 5 {
+				suggestions = append(suggestions, f.RelPath)
+			}
+		}
+		msg := fmt.Sprintf("%q is a directory, not a file — specify a file path", targetPath)
+		if len(suggestions) > 0 {
+			msg += fmt.Sprintf("; files in this directory: %s", strings.Join(suggestions, ", "))
+		}
+		return nil, fmt.Errorf("%s", msg)
+	}
 
 	for i, f := range listing.Data.Files {
 		if f.Path == abs || f.RelPath == rel {

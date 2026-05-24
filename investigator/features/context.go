@@ -296,6 +296,23 @@ func RunContext(
 		resp.IncludedRelPaths = append(resp.IncludedRelPaths, sel.Candidate.File.RelPath)
 	}
 
+	// Populate flat Files[] for agents — one entry per selected file, with
+	// content included, ordered by rank. No Capsule.Facts traversal needed.
+	for i, fact := range capsule.Facts {
+		sel := capsule.Selections[i]
+		resp.Files = append(resp.Files, cfeatures.ContextFileEntry{
+			Path:          fact.Source.Path,
+			RelPath:       fact.Source.RelPath,
+			Language:      fact.Source.Language,
+			Role:          fact.Source.Role,
+			TokenEstimate: fact.TokenEstimate.Tokens,
+			Rank:          sel.Rank,
+			Score:         sel.Candidate.Score,
+			Reason:        sel.Reason,
+			Content:       fact.Content,
+		})
+	}
+
 	resp.EvidenceScanned = provider.TokenEstimate{
 		Tokens:     totalCandidateTokens,
 		Method:     "heuristic_chars_div4",

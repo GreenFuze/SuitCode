@@ -34,6 +34,14 @@ const defaultCoordinatorURL = "http://127.0.0.1:7878"
 // is used. Useful for monitoring agent sessions without polluting JSON output.
 var logCalls bool
 
+// outputFile is set by the --output persistent flag. When non-empty, JSON
+// output is written to this file instead of stdout. This lets agents avoid
+// PowerShell's broken pipe behaviour: instead of piping suitcode into
+// ConvertFrom-Json, write to a temp file and read it afterwards.
+//   suitcode . context --files foo.go --format json --output result.json
+//   $r = Get-Content result.json | ConvertFrom-Json
+var outputFile string
+
 // usage is the full reference shown for --help / -h / usage / bare invocation.
 const usage = `SuitCode — deterministic repository intelligence for coding agents
 
@@ -115,10 +123,22 @@ OUTPUT:
   Agents should use --format json for programmatic use — the JSON contains
   all evidence, provenance, metrics, and limitation notices.
 
+  NOTE: SuitCode writes progress lines to stderr and JSON to stdout.
+  In bash/zsh, suppress stderr when piping JSON:
+    suitcode . context --files f.go --format json 2>/dev/null | jq .
+
+  In PowerShell, piping may fail ("pipe being closed"). Use --output instead:
+    suitcode . context --files f.go --format json --output result.json
+    $r = Get-Content result.json | ConvertFrom-Json
+
 GLOBAL FLAGS:
-  --log-calls   Print a compact metric line to stderr after each feature call,
-                even in --format json mode. Useful for monitoring an agent
-                session: suitcode . context --files ... --format json --log-calls
+  --log-calls     Print a compact metric line to stderr after each feature call,
+                  even in --format json mode. Useful for monitoring an agent
+                  session: suitcode . context --files ... --format json --log-calls
+
+  --output <file> Write --format json output to a file instead of stdout.
+                  Avoids PowerShell "pipe being closed" errors. The file is
+                  created/truncated; its parent directory must already exist.
 
 EXAMPLES:
   # Pre-warm once per coding session (do this first)
@@ -231,6 +251,11 @@ func newRootCmd(repoPath string) *cobra.Command {
 	// Works alongside both --format json (agent use) and the default brief output.
 	root.PersistentFlags().BoolVar(&logCalls, "log-calls", false,
 		"print a compact metric line to stderr after each feature call (useful for monitoring agent sessions)")
+
+	// --output: redirect JSON to a file instead of stdout, avoiding PowerShell
+	// pipe issues. The file is created/truncated; parent directory must exist.
+	root.PersistentFlags().StringVar(&outputFile, "output", "",
+		"write --format json output to this file instead of stdout (avoids PowerShell pipe issues)")
 
 	root.AddCommand(
 		newStatusCmd(repoPath),
@@ -853,9 +878,22 @@ func printFeatureResult[T any](resp *T, format string, brief func(*T), logCallFn
 	return nil
 }
 
-// writeJSON pretty-prints any value as indented JSON to stdout.
+// writeJSON pretty-prints any value as indented JSON. When --output is set the
+// output goes to that file (created/truncated); otherwise it goes to stdout.
+// Using --output sidesteps PowerShell's "pipe being closed" error when piping
+// into ConvertFrom-Json: write to a file and read it back instead.
 func writeJSON(v any) error {
-	enc := json.NewEncoder(os.Stdout)
+	out := os.Stdout
+	if outputFile != "" {
+		f, err := os.Create(outputFile)
+		if err != nil {
+			return fmt.Errorf("--output: cannot create %q: %w", outputFile, err)
+		}
+		defer f.Close()
+		out = f
+	}
+
+	enc := json.NewEncoder(out)
 	enc.SetIndent("", "  ")
 	enc.SetEscapeHTML(false)
 	return enc.Encode(v)

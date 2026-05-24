@@ -87,11 +87,38 @@ func RunExplainFile(
 	fileEst, _ := estimator.EstimateFile(fsFile.Path)
 	resp.FileTokenEstimate = fileEst
 
+	// Populate symbols from the language provider when available.
+	if langProv != nil && langProv.Ready() {
+		symResult, symErr := langProv.GetSymbols(ctx, fsFile.Path)
+		if symErr == nil && symResult != nil {
+			prov := provider.Provenance{
+				SourceKind:      provider.SourceKindSyntax,
+				SourceTool:      "language-provider",
+				Authority:       provider.AuthorityVerified,
+				EvidenceSummary: fmt.Sprintf("symbols extracted from %s by language provider", fsFile.RelPath),
+				EvidencePaths:   []string{fsFile.Path},
+			}
+			for _, name := range symResult.Data {
+				resp.Symbols = append(resp.Symbols, cfeatures.SymbolInfo{
+					Name:       name,
+					Provenance: prov,
+				})
+			}
+			resp.Limitations = append(resp.Limitations, symResult.Limitations...)
+		} else if symErr != nil {
+			resp.Limitations = append(resp.Limitations, provider.Limitation{
+				Kind:    "symbols_query_failed",
+				Message: fmt.Sprintf("symbol query failed for %s: %v", fsFile.RelPath, symErr),
+				Scope:   fsFile.RelPath,
+			})
+		}
+	}
+
 	// Parse imports — use the language provider when available, else fall back
 	// to the built-in heuristic scanners.
-	imports, limitations := parseImports(ctx, fsFile, req.RepoPath, listing, langProv)
+	imports, importLims := parseImports(ctx, fsFile, req.RepoPath, listing, langProv)
 	resp.Imports = imports
-	resp.Limitations = limitations
+	resp.Limitations = append(resp.Limitations, importLims...)
 
 	// Find test files for this source file.
 	testFiles := testFilesForSource(listing, fsFile.RelPath)

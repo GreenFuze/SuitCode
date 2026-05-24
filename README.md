@@ -172,6 +172,23 @@ curl -s -X POST http://127.0.0.1:7878/api/v1/context \
 
 All responses include a `metrics` block: tokens used, files considered, files included, compression ratio, and whether the import graph was available for this result.
 
+### PowerShell compatibility
+
+SuitCode writes progress lines to **stderr** and JSON to **stdout**. In bash/zsh, suppress stderr when piping:
+
+```sh
+suitcode . context --files src/app.ts --format json 2>/dev/null | jq .
+```
+
+In PowerShell, piping JSON output may fail with "pipe being closed". Use `--output` instead:
+
+```powershell
+suitcode . context --files src/app.ts --format json --output result.json
+$r = Get-Content result.json | ConvertFrom-Json
+```
+
+The `--output` flag is available on every feature command.
+
 ---
 
 ## Supported languages
