@@ -6,13 +6,17 @@ import (
 	"bytes"
 	"context"
 	_ "embed"
+	"encoding/json"
 	"fmt"
 	"image"
 	"image/color"
 	"image/png"
+	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -127,19 +131,29 @@ type trayMenu struct {
 	// hidden whenever at least one project slot is visible.
 	mNoProjects *systray.MenuItem
 
-	// slots are pre-allocated project rows; unused ones are hidden.
+	// slots are pre-allocated project sub-menus; unused ones are hidden.
 	slots [maxProjectSlots]*projectSlot
 
 	// mQuit triggers graceful coordinator shutdown.
 	mQuit *systray.MenuItem
 }
 
-// projectSlot is one pre-allocated row in the tray menu for a single project.
+// projectSlot is one pre-allocated sub-menu entry for a single active project.
+// The parent item is the clickable header showing the full project path; its
+// children are the action items (copy log, copy metrics, open folder, stop).
 type projectSlot struct {
-	item *systray.MenuItem
+	// parent is the sub-menu trigger item whose title is the full project path.
+	parent *systray.MenuItem
+
+	// Action sub-items under parent.
+	mCopyLog *systray.MenuItem // "Copy Coordinator Log"
+	mCopyMet *systray.MenuItem // "Copy Metrics"
+	mOpenDir *systray.MenuItem // "Open Project Folder"
+	mStop    *systray.MenuItem // "Stop Investigator"
 
 	mu          sync.Mutex
-	projectPath string // empty when the slot is hidden
+	projectPath string           // empty when the slot is hidden
+	projectInfo coord.ProjectInfo // last polled state (port, startedAt)
 }
 
 func newTrayMenu(ctx context.Context, client *coord.Client) *trayMenu {
@@ -158,11 +172,25 @@ func (m *trayMenu) build() {
 	m.mNoProjects = systray.AddMenuItem("No active projects — run 'suitcode <path> warmup'", "")
 	m.mNoProjects.Disable()
 
-	// Pre-allocate project slots, all initially hidden.
+	// Pre-allocate project sub-menu slots, all initially hidden.
 	for i := range m.slots {
-		item := systray.AddMenuItem("", "")
-		item.Hide()
-		s := &projectSlot{item: item}
+		// Parent item — title will be set to the full project path when active.
+		parent := systray.AddMenuItem("", "Active investigator project")
+		parent.Hide()
+
+		// Action children. These inherit parent visibility on all platforms.
+		mCopyLog := parent.AddSubMenuItem("Copy Coordinator Log", "Copy the coordinator log file to the clipboard")
+		mCopyMet := parent.AddSubMenuItem("Copy Metrics", "Copy investigator status and metrics to the clipboard")
+		mOpenDir := parent.AddSubMenuItem("Open Project Folder", "Open the project directory in the system file manager")
+		mStop := parent.AddSubMenuItem("Stop Investigator", "Terminate the investigator process for this project")
+
+		s := &projectSlot{
+			parent:   parent,
+			mCopyLog: mCopyLog,
+			mCopyMet: mCopyMet,
+			mOpenDir: mOpenDir,
+			mStop:    mStop,
+		}
 		m.slots[i] = s
 		go m.runSlotHandler(s)
 	}
@@ -190,9 +218,9 @@ func (m *trayMenu) updateStatus(text string) {
 func (m *trayMenu) updateProjects(projects []coord.ProjectInfo) {
 	for i, s := range m.slots {
 		if i < len(projects) {
-			s.setProject(projects[i].ProjectPath)
+			s.setProjectInfo(projects[i])
 		} else {
-			s.setProject("")
+			s.clearProject()
 		}
 	}
 
@@ -207,30 +235,100 @@ func (m *trayMenu) updateProjects(projects []coord.ProjectInfo) {
 	}
 }
 
-// runSlotHandler loops over click events for one project slot. A click stops
-// the associated investigator and clears the slot immediately for responsive UX.
+// runSlotHandler loops over action-item click events for one project slot.
+// Runs in a dedicated goroutine per slot — blocking operations (clipboard
+// writes, HTTP calls) are safe here because they don't affect other slots.
 func (m *trayMenu) runSlotHandler(s *projectSlot) {
 	for {
 		select {
 		case <-m.ctx.Done():
 			return
-		case _, ok := <-s.item.ClickedCh:
+
+		case _, ok := <-s.mCopyLog.ClickedCh:
 			if !ok {
 				return
 			}
-			path := s.getProject()
-			if path == "" {
-				continue
-			}
+			m.handleCopyLog(s)
 
-			// Clear the slot immediately; the poller will sync on the next cycle.
-			s.setProject("")
-			m.refreshStatus()
-
-			if err := m.client.StopProject(m.ctx, path); err != nil {
-				logf("warn: tray: stop %s: %v", path, err)
+		case _, ok := <-s.mCopyMet.ClickedCh:
+			if !ok {
+				return
 			}
+			m.handleCopyMetrics(s)
+
+		case _, ok := <-s.mOpenDir.ClickedCh:
+			if !ok {
+				return
+			}
+			m.handleOpenFolder(s)
+
+		case _, ok := <-s.mStop.ClickedCh:
+			if !ok {
+				return
+			}
+			m.handleStop(s)
 		}
+	}
+}
+
+// ── Slot action handlers ──────────────────────────────────────────────────────
+
+// handleCopyLog reads the coordinator log file and sends it to the clipboard.
+func (m *trayMenu) handleCopyLog(_ *projectSlot) {
+	content, err := readCoordinatorLog()
+	if err != nil {
+		logf("tray: copy log: %v", err)
+		return
+	}
+	if err := copyToClipboard(content); err != nil {
+		logf("tray: copy log to clipboard: %v", err)
+	}
+}
+
+// handleCopyMetrics formats the project's status and metrics as plain text,
+// fetches the current readiness level from the investigator, and copies the
+// result to the clipboard.
+func (m *trayMenu) handleCopyMetrics(s *projectSlot) {
+	s.mu.Lock()
+	info := s.projectInfo
+	s.mu.Unlock()
+
+	if info.ProjectPath == "" {
+		return
+	}
+
+	text := formatProjectMetrics(info)
+	if err := copyToClipboard(text); err != nil {
+		logf("tray: copy metrics to clipboard: %v", err)
+	}
+}
+
+// handleOpenFolder opens the project directory in the system file manager.
+func (m *trayMenu) handleOpenFolder(s *projectSlot) {
+	path := s.getProject()
+	if path == "" {
+		return
+	}
+	if err := openFolder(path); err != nil {
+		logf("tray: open folder %s: %v", path, err)
+	}
+}
+
+// handleStop stops the investigator for the slot's project. The slot is cleared
+// immediately so the tray responds before the next poll cycle.
+func (m *trayMenu) handleStop(s *projectSlot) {
+	path := s.getProject()
+	if path == "" {
+		return
+	}
+
+	// Clear the slot immediately for responsive UX; the poller will confirm on
+	// the next cycle.
+	s.clearProject()
+	m.refreshStatus()
+
+	if err := m.client.StopProject(m.ctx, path); err != nil {
+		logf("warn: tray: stop %s: %v", path, err)
 	}
 }
 
@@ -246,7 +344,6 @@ func (m *trayMenu) refreshStatus() {
 
 	m.updateStatus(fmt.Sprintf("Coordinator: online · %d project(s)", count))
 
-	// Mirror placeholder visibility.
 	if m.mNoProjects != nil {
 		if count == 0 {
 			m.mNoProjects.Show()
@@ -256,21 +353,36 @@ func (m *trayMenu) refreshStatus() {
 	}
 }
 
-// setProject updates the slot to display the given path, or hides it if empty.
-func (s *projectSlot) setProject(path string) {
+// ── projectSlot helpers ───────────────────────────────────────────────────────
+
+// setProjectInfo updates the slot with live project data and shows the parent
+// sub-menu. The title is the full project path so users can distinguish
+// multiple simultaneous investigators.
+func (s *projectSlot) setProjectInfo(info coord.ProjectInfo) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.projectPath = path
+	s.projectPath = info.ProjectPath
+	s.projectInfo = info
 
-	if path == "" {
-		s.item.Hide()
+	if info.ProjectPath == "" {
+		s.parent.Hide()
 		return
 	}
 
-	s.item.SetTitle("Stop  " + filepath.Base(path))
-	s.item.SetTooltip(path)
-	s.item.Show()
+	s.parent.SetTitle(info.ProjectPath)
+	s.parent.SetTooltip(fmt.Sprintf("port %d · started %s", info.Port, info.StartedAt))
+	s.parent.Show()
+}
+
+// clearProject hides the slot, removing it from the visible menu.
+func (s *projectSlot) clearProject() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.projectPath = ""
+	s.projectInfo = coord.ProjectInfo{}
+	s.parent.Hide()
 }
 
 func (s *projectSlot) getProject() string {
@@ -344,6 +456,101 @@ func (p *trayPoller) poll() {
 	count := len(projectsResp.Projects)
 	p.menu.updateStatus(fmt.Sprintf("Coordinator: online · %d project(s)", count))
 	p.menu.updateProjects(projectsResp.Projects)
+}
+
+// ── Clipboard & shell helpers ─────────────────────────────────────────────────
+
+// copyToClipboard writes text to the system clipboard using a platform-native
+// command-line utility (clip.exe on Windows, pbcopy on macOS, xclip/xsel on
+// Linux). No external Go package is required.
+func copyToClipboard(text string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("clip.exe")
+	case "darwin":
+		cmd = exec.Command("pbcopy")
+	default:
+		// Prefer xclip; fall back to xsel when xclip is absent.
+		if _, err := exec.LookPath("xclip"); err == nil {
+			cmd = exec.Command("xclip", "-selection", "clipboard")
+		} else {
+			cmd = exec.Command("xsel", "--clipboard", "--input")
+		}
+	}
+
+	cmd.Stdin = strings.NewReader(text)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("clipboard command failed: %w", err)
+	}
+	return nil
+}
+
+// openFolder opens path in the platform's default file manager.
+func openFolder(path string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("explorer", path)
+	case "darwin":
+		cmd = exec.Command("open", path)
+	default:
+		cmd = exec.Command("xdg-open", path)
+	}
+	return cmd.Start()
+}
+
+// coordinatorLogPath returns the path of the coordinator log file, or an empty
+// string if the platform does not write one (non-Windows builds log to stderr).
+func coordinatorLogPath() string {
+	if runtime.GOOS != "windows" {
+		return ""
+	}
+	appData := os.Getenv("APPDATA")
+	if appData == "" {
+		return ""
+	}
+	return filepath.Join(appData, "SuitCode", "coordinator.log")
+}
+
+// readCoordinatorLog returns the current contents of the coordinator log file.
+func readCoordinatorLog() (string, error) {
+	path := coordinatorLogPath()
+	if path == "" {
+		return "", fmt.Errorf("coordinator log is not written to a file on this platform")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read coordinator log: %w", err)
+	}
+	return string(data), nil
+}
+
+// formatProjectMetrics builds a human-readable summary of an investigator's
+// status. It attempts a lightweight HTTP call to the investigator's health
+// endpoint to include the current readiness level.
+func formatProjectMetrics(info coord.ProjectInfo) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Project:   %s\n", info.ProjectPath))
+	sb.WriteString(fmt.Sprintf("Port:      %d\n", info.Port))
+	sb.WriteString(fmt.Sprintf("Started:   %s\n", info.StartedAt))
+
+	// Fetch current readiness level directly from the investigator.
+	baseURL := fmt.Sprintf("http://127.0.0.1:%d", info.Port)
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(baseURL + "/api/v1/health")
+	if err == nil && resp.Body != nil {
+		defer resp.Body.Close()
+
+		var health struct {
+			ReadinessLevel int `json:"readiness_level"`
+		}
+		if json.NewDecoder(resp.Body).Decode(&health) == nil {
+			sb.WriteString(fmt.Sprintf("Readiness: %d/3\n", health.ReadinessLevel))
+		}
+	}
+
+	return sb.String()
 }
 
 // ── Icon ──────────────────────────────────────────────────────────────────────
@@ -453,22 +660,22 @@ func pngToICO(pngBytes []byte, w, h int) []byte {
 	buf := make([]byte, headerLen+dirEntryLen+int(dataLen))
 
 	// ICONDIR header.
-	buf[0] = 0        // reserved
-	buf[1] = 0        // reserved
-	buf[2] = 1        // type: 1 = icon
-	buf[3] = 0        //
-	buf[4] = 1        // image count (low byte)
-	buf[5] = 0        // image count (high byte)
+	buf[0] = 0 // reserved
+	buf[1] = 0 // reserved
+	buf[2] = 1 // type: 1 = icon
+	buf[3] = 0 //
+	buf[4] = 1 // image count (low byte)
+	buf[5] = 0 // image count (high byte)
 
 	// ICONDIRENTRY.
-	buf[6] = wb       // width
-	buf[7] = hb       // height
-	buf[8] = 0        // colour count (0 = >8-bit)
-	buf[9] = 0        // reserved
-	buf[10] = 1       // planes (low)
-	buf[11] = 0       // planes (high)
-	buf[12] = 32      // bits per pixel (low) — 32-bit RGBA
-	buf[13] = 0       // bits per pixel (high)
+	buf[6] = wb  // width
+	buf[7] = hb  // height
+	buf[8] = 0   // colour count (0 = >8-bit)
+	buf[9] = 0   // reserved
+	buf[10] = 1  // planes (low)
+	buf[11] = 0  // planes (high)
+	buf[12] = 32 // bits per pixel (low) — 32-bit RGBA
+	buf[13] = 0  // bits per pixel (high)
 	// data size (4 bytes LE)
 	buf[14] = byte(dataLen)
 	buf[15] = byte(dataLen >> 8)

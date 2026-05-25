@@ -214,8 +214,14 @@ func (r *Registry) spawn(projectPath string) (*InvestigatorProcess, error) {
 	// completes its context is cancelled, and exec.CommandContext would kill the
 	// child immediately. Shutdown is handled explicitly via Stop/Shutdown.
 	cmd := exec.CommandContext(context.Background(), r.invBinary, args...)
-	// Stdio is intentionally nil — investigator writes its own [sc investigator] logs to stderr.
-	// We don't capture them here; they appear in the coordinator's terminal.
+
+	// Suppress console window creation. On Windows the coordinator is a
+	// windowsgui binary; without CREATE_NO_WINDOW the OS opens a new console
+	// window for every console-subsystem child process it spawns.
+	hideChildWindow(cmd)
+
+	// Stdio is intentionally nil — investigator writes its own logs to stderr.
+	// They do not appear anywhere in the windowsgui coordinator build (no console).
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start %q: %w", r.invBinary, err)
 	}
