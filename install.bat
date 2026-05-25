@@ -47,9 +47,9 @@ if "!CI!"=="1" (
     go install !REPO!/coordinator@latest  || exit /b 1
     go install !REPO!/investigator@latest || exit /b 1
 ) else (
-    go install !REPO!/suitcode@latest                  || exit /b 1
-    go install -tags systray !REPO!/coordinator@latest || exit /b 1
-    go install !REPO!/investigator@latest              || exit /b 1
+    go install !REPO!/suitcode@latest                                            || exit /b 1
+    go install -tags systray -ldflags "-H windowsgui" !REPO!/coordinator@latest || exit /b 1
+    go install !REPO!/investigator@latest                                        || exit /b 1
 )
 
 echo   suitcode       OK

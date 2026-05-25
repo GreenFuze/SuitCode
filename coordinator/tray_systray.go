@@ -70,9 +70,17 @@ func (t *tray) run() {
 
 // onReady is invoked by systray once the native tray is initialised.
 func (t *tray) onReady() {
-	systray.SetIcon(trayIcon())
 	systray.SetTitle("SuitCode")
 	systray.SetTooltip("SuitCode — repository intelligence")
+
+	// Set the icon after a short delay. On Windows, Shell_NotifyIcon(NIM_MODIFY)
+	// can fail with ERROR_SUCCESS if called immediately after NIM_ADD —
+	// the shell notification area isn't fully ready yet. Deferring by 200 ms
+	// avoids the spurious "unable to set icon" log message.
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		systray.SetIcon(trayIcon())
+	}()
 
 	// Build menu structure.
 	t.menu = newTrayMenu(t.ctx, t.client)

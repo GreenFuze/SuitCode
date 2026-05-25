@@ -124,9 +124,3 @@ func resolveInvestigatorBinary(explicit string) (string, error) {
 	return path, nil
 }
 
-// logf writes a timestamped message to stderr with the [sc coordinator] prefix.
-func logf(format string, args ...any) {
-	ts := time.Now().Format("15:04:05.000")
-	msg := fmt.Sprintf(format, args...)
-	fmt.Fprintf(os.Stderr, "[sc coordinator] %s %s\n", ts, msg)
-}
