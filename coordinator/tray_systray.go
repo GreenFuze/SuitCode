@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	_ "embed"
 	"fmt"
 	"image"
 	"image/color"
@@ -18,6 +19,9 @@ import (
 	"fyne.io/systray"
 	coord "github.com/GreenFuze/SuitCode/core/coordinator"
 )
+
+//go:embed assets/icon.png
+var iconPNG []byte
 
 const (
 	trayPollInterval = 5 * time.Second
@@ -309,28 +313,77 @@ func (p *trayPoller) poll() {
 
 // ── Icon ──────────────────────────────────────────────────────────────────────
 
-// trayIcon returns a 32×32 green square PNG as bytes.
-// This is a placeholder; replace with a branded asset when ready.
+// trayIconSize is the edge length of the PNG passed to systray. Windows will
+// use this as the HICON source; 256 px gives crisp rendering at every DPI.
+const trayIconSize = 256
+
+// trayIcon decodes the embedded assets/icon.png, down-samples it to
+// trayIconSize × trayIconSize using a box filter, and returns the result as
+// a fresh PNG byte slice. The original source may be any size ≥ trayIconSize.
 func trayIcon() []byte {
-	const size = 32
+	src, _, err := image.Decode(bytes.NewReader(iconPNG))
+	if err != nil {
+		// Fallback: return the raw embedded bytes unchanged.
+		return iconPNG
+	}
 
-	img := image.NewNRGBA(image.Rect(0, 0, size, size))
+	// Down-sample only if the source is larger than the target.
+	srcBounds := src.Bounds()
+	sw, sh := srcBounds.Dx(), srcBounds.Dy()
+	if sw <= trayIconSize && sh <= trayIconSize {
+		return iconPNG
+	}
 
-	// Tailwind green-500 fill with a slightly darker border.
-	fill := color.NRGBA{R: 34, G: 197, B: 94, A: 255}
-	border := color.NRGBA{R: 22, G: 163, B: 74, A: 255}
+	// Box-filter: for each output pixel, average every source pixel that falls
+	// inside its mapped source rectangle. Gives much better quality than
+	// nearest-neighbour for large reductions (e.g. 1080 → 256).
+	dst := image.NewNRGBA(image.Rect(0, 0, trayIconSize, trayIconSize))
+	scaleX := float64(sw) / trayIconSize
+	scaleY := float64(sh) / trayIconSize
 
-	for y := range size {
-		for x := range size {
-			if x == 0 || y == 0 || x == size-1 || y == size-1 {
-				img.SetNRGBA(x, y, border)
-			} else {
-				img.SetNRGBA(x, y, fill)
+	for oy := 0; oy < trayIconSize; oy++ {
+		sy0 := int(float64(oy) * scaleY)
+		sy1 := int(float64(oy+1) * scaleY)
+		if sy1 >= sh {
+			sy1 = sh - 1
+		}
+
+		for ox := 0; ox < trayIconSize; ox++ {
+			sx0 := int(float64(ox) * scaleX)
+			sx1 := int(float64(ox+1) * scaleX)
+			if sx1 >= sw {
+				sx1 = sw - 1
+			}
+
+			// Accumulate linear RGBA over the source box.
+			var rSum, gSum, bSum, aSum float64
+			n := 0
+			for sy := sy0; sy <= sy1; sy++ {
+				for sx := sx0; sx <= sx1; sx++ {
+					cr, cg, cb, ca := src.At(sx, sy).RGBA()
+					rSum += float64(cr >> 8)
+					gSum += float64(cg >> 8)
+					bSum += float64(cb >> 8)
+					aSum += float64(ca >> 8)
+					n++
+				}
+			}
+
+			if n > 0 {
+				fn := float64(n)
+				dst.SetNRGBA(ox, oy, color.NRGBA{
+					R: uint8(rSum / fn),
+					G: uint8(gSum / fn),
+					B: uint8(bSum / fn),
+					A: uint8(aSum / fn),
+				})
 			}
 		}
 	}
 
 	var buf bytes.Buffer
-	_ = png.Encode(&buf, img)
+	if err := png.Encode(&buf, dst); err != nil {
+		return iconPNG
+	}
 	return buf.Bytes()
 }
