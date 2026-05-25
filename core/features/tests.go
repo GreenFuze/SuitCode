@@ -4,10 +4,10 @@ import "github.com/GreenFuze/SuitCode/core/provider"
 
 // RelevantTest pairs a TestReference with the reason it was selected.
 type RelevantTest struct {
-	Test       TestReference
-	Reason     string
-	Provenance provider.Provenance
-	Confidence float64
+	Test       TestReference      `json:"test"`
+	Reason     string             `json:"reason"`
+	Provenance provider.Provenance `json:"provenance"`
+	Confidence float64            `json:"confidence"`
 }
 
 // TestsRequest parameters for the tests feature.
@@ -25,12 +25,12 @@ type TestsRequest struct {
 type TestsResponse struct {
 	BaseFeatureResponse
 
-	TargetPath    string
-	RelevantTests []RelevantTest
+	TargetPath    string         `json:"target_path,omitempty"`
+	RelevantTests []RelevantTest `json:"relevant_tests"`
 
-	TestsConsidered int
-	TestsSelected   int
-	TestsExcluded   int
+	TestsConsidered int `json:"tests_considered"`
+	TestsSelected   int `json:"tests_selected"`
+	TestsExcluded   int `json:"tests_excluded"`
 
-	EstimatedContextAvoided provider.TokenEstimate
+	EstimatedContextAvoided provider.TokenEstimate `json:"estimated_context_avoided"`
 }

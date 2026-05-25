@@ -713,7 +713,25 @@ func newImpactCmd(repoPath string) *cobra.Command {
 
 			return printFeatureResult(resp, format, func(resp *cfeatures.ImpactResponse) {
 				printProgress(resp.BaseFeatureResponse)
-				fmt.Printf("Impact: %d downstream files · %d tokens\n", len(resp.ImpactedFiles), resp.Metrics.Budget.Used)
+
+				// Distinguish import-graph-backed results from proximity heuristic.
+				// When the no_import_graph limitation is present, impacted_files are
+				// same-directory neighbours only — not real downstream importers.
+				hasImportGraph := true
+				for _, lim := range resp.Limitations {
+					if lim.Kind == "no_import_graph" {
+						hasImportGraph = false
+						break
+					}
+				}
+
+				if hasImportGraph {
+					fmt.Printf("Impact: %d downstream files · %d tokens\n",
+						len(resp.ImpactedFiles), resp.Metrics.Budget.Used)
+				} else {
+					fmt.Printf("Impact: %d nearby files (proximity heuristic; no import graph — see limitations) · %d tokens\n",
+						len(resp.ImpactedFiles), resp.Metrics.Budget.Used)
+				}
 			}, func() {
 				printCallLog("impact", resp.BaseFeatureResponse, 0, 0, 0)
 			})

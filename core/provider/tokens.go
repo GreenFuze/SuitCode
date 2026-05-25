@@ -11,12 +11,12 @@ import (
 // All estimates in SuitCode v1 use the heuristic_chars_div4 method and must
 // always set IsEstimate = true. Do not claim actual backend tokens saved.
 type TokenEstimate struct {
-	Tokens int
+	Tokens int    `json:"tokens"`
 	// Method names the estimation algorithm used (e.g. "heuristic_chars_div4").
-	Method string
+	Method     string `json:"method,omitempty"`
 	// IsEstimate is always true in v1; present to remind callers not to treat
 	// this as a precise billing figure.
-	IsEstimate bool
+	IsEstimate bool `json:"is_estimate"`
 }
 
 // Zero returns a zero-valued TokenEstimate (no tokens, no method).

@@ -38,13 +38,13 @@ const (
 // Provenance records the origin and trustworthiness of a piece of evidence.
 // Every evidence item returned by a provider must carry provenance.
 type Provenance struct {
-	SourceKind SourceKind
-	SourceTool string
-	Authority  Authority
+	SourceKind SourceKind `json:"source_kind"`
+	SourceTool string     `json:"source_tool,omitempty"`
+	Authority  Authority  `json:"authority"`
 	// EvidenceSummary is a short human-readable description of what was observed.
-	EvidenceSummary string
+	EvidenceSummary string `json:"evidence_summary,omitempty"`
 	// EvidencePaths lists the specific files or URIs that were consulted.
-	EvidencePaths []string
+	EvidencePaths []string `json:"evidence_paths,omitempty"`
 }
 
 // Limitation describes something the provider could not determine or a
@@ -52,31 +52,31 @@ type Provenance struct {
 type Limitation struct {
 	// Kind is a machine-readable category (e.g. "no_lsp", "large_file",
 	// "no_build_manifest").
-	Kind string
+	Kind string `json:"kind"`
 	// Message is a human-readable explanation.
-	Message string
+	Message string `json:"message"`
 	// Scope describes which files or subsystems this limitation applies to.
-	Scope string
+	Scope string `json:"scope,omitempty"`
 }
 
 // EvidenceItem is a generic labelled evidence value produced by a provider.
 type EvidenceItem struct {
-	Kind       string
-	Value      string
-	Provenance Provenance
+	Kind       string     `json:"kind"`
+	Value      string     `json:"value"`
+	Provenance Provenance `json:"provenance"`
 }
 
 // FileReference identifies a file within a repository, with language and role
 // classification and a provenance chain.
 type FileReference struct {
 	// Path is the absolute filesystem path.
-	Path string
+	Path string `json:"path"`
 	// RelPath is the path relative to the repository root, using forward slashes.
-	RelPath string
+	RelPath string `json:"rel_path"`
 	// Language is the detected programming or markup language (empty if unknown).
-	Language string
+	Language string `json:"language,omitempty"`
 	// Role classifies the file: "source", "test", "generated", "config",
 	// "docs", "vendor", or "other".
-	Role       string
-	Provenance Provenance
+	Role       string     `json:"role,omitempty"`
+	Provenance Provenance `json:"provenance"`
 }
