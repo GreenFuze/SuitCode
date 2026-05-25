@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="coordinator/assets/icon.png" alt="SuitCode" width="96" />
+</p>
+
 # SuitCode
 
 **Your coding agent actually knows your codebase. Not guesses — knows.**

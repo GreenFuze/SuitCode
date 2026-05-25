@@ -29,7 +29,11 @@ var iconPNG []byte
 
 const (
 	trayPollInterval = 5 * time.Second
-	maxProjectSlots  = 8
+
+	// maxProjectSlots controls how many investigators can be shown in the
+	// tray menu simultaneously. Each slot occupies 6 items (header + 4 actions
+	// + visual separator), so keep this low to avoid a crowded menu.
+	maxProjectSlots = 4
 )
 
 // runTray starts the system-tray icon on the main goroutine. It blocks until
@@ -131,29 +135,40 @@ type trayMenu struct {
 	// hidden whenever at least one project slot is visible.
 	mNoProjects *systray.MenuItem
 
-	// slots are pre-allocated project sub-menus; unused ones are hidden.
+	// slots are pre-allocated flat groups of menu items; unused ones are hidden.
 	slots [maxProjectSlots]*projectSlot
 
 	// mQuit triggers graceful coordinator shutdown.
 	mQuit *systray.MenuItem
 }
 
-// projectSlot is one pre-allocated sub-menu entry for a single active project.
-// The parent item is the clickable header showing the full project path; its
-// children are the action items (copy log, copy metrics, open folder, stop).
+// projectSlot is a flat group of pre-allocated menu items for one active
+// investigator project. The items are ordinary (non-nested) menu items laid
+// out in sequence:
+//
+//	[mHeader ] ← disabled header, shows the full project path
+//	[mCopyLog] ← "  Copy Coordinator Log"
+//	[mCopyMet] ← "  Copy Metrics"
+//	[mOpenDir] ← "  Open Project Folder"
+//	[mStop   ] ← "  Stop Investigator"
+//	[mSep    ] ← "─────────────────────" (disabled visual separator)
+//
+// WHY FLAT INSTEAD OF SUB-MENUS? fyne.io/systray's Windows backend converts
+// a menu item into a sub-menu by calling SetMenuItemInfo on the parent while
+// it is present in the native HMENU. Pre-allocating hidden items and later
+// showing them prevents that call from succeeding, leaving the sub-menu handle
+// orphaned. Flat items with hide/show are fully supported and reliable.
 type projectSlot struct {
-	// parent is the sub-menu trigger item whose title is the full project path.
-	parent *systray.MenuItem
-
-	// Action sub-items under parent.
-	mCopyLog *systray.MenuItem // "Copy Coordinator Log"
-	mCopyMet *systray.MenuItem // "Copy Metrics"
-	mOpenDir *systray.MenuItem // "Open Project Folder"
-	mStop    *systray.MenuItem // "Stop Investigator"
+	mHeader  *systray.MenuItem // disabled; title = full project path
+	mCopyLog *systray.MenuItem // "  Copy Coordinator Log"
+	mCopyMet *systray.MenuItem // "  Copy Metrics"
+	mOpenDir *systray.MenuItem // "  Open Project Folder"
+	mStop    *systray.MenuItem // "  Stop Investigator"
+	mSep     *systray.MenuItem // visual separator (disabled dashes)
 
 	mu          sync.Mutex
-	projectPath string           // empty when the slot is hidden
-	projectInfo coord.ProjectInfo // last polled state (port, startedAt)
+	projectPath string           // empty when slot is hidden
+	projectInfo coord.ProjectInfo // last polled state
 }
 
 func newTrayMenu(ctx context.Context, client *coord.Client) *trayMenu {
@@ -166,36 +181,47 @@ func (m *trayMenu) build() {
 	m.mStatus = systray.AddMenuItem("SuitCode — connecting...", "Coordinator connection status")
 	m.mStatus.Disable()
 
-	// Placeholder shown when no investigators are running. Starts visible
-	// because we haven't fetched project state yet; updateProjects hides it
-	// once any project slot becomes active.
+	// Placeholder shown when no investigators are running.
 	m.mNoProjects = systray.AddMenuItem("No active projects — run 'suitcode <path> warmup'", "")
 	m.mNoProjects.Disable()
 
-	// Pre-allocate project sub-menu slots, all initially hidden.
+	// Pre-allocate project slots. Each slot is a group of flat menu items.
+	// All items start hidden; updateProjects shows/hides them as needed.
 	for i := range m.slots {
-		// Parent item — title will be set to the full project path when active.
-		parent := systray.AddMenuItem("", "Active investigator project")
-		parent.Hide()
+		mHeader := systray.AddMenuItem("", "Active investigator project")
+		mHeader.Disable()
+		mHeader.Hide()
 
-		// Action children. These inherit parent visibility on all platforms.
-		mCopyLog := parent.AddSubMenuItem("Copy Coordinator Log", "Copy the coordinator log file to the clipboard")
-		mCopyMet := parent.AddSubMenuItem("Copy Metrics", "Copy investigator status and metrics to the clipboard")
-		mOpenDir := parent.AddSubMenuItem("Open Project Folder", "Open the project directory in the system file manager")
-		mStop := parent.AddSubMenuItem("Stop Investigator", "Terminate the investigator process for this project")
+		mCopyLog := systray.AddMenuItem("  Copy Coordinator Log", "Copy the coordinator log file to the clipboard")
+		mCopyLog.Hide()
+
+		mCopyMet := systray.AddMenuItem("  Copy Metrics", "Copy investigator status and metrics to the clipboard")
+		mCopyMet.Hide()
+
+		mOpenDir := systray.AddMenuItem("  Open Project Folder", "Open the project directory in the system file manager")
+		mOpenDir.Hide()
+
+		mStop := systray.AddMenuItem("  Stop Investigator", "Terminate the investigator process for this project")
+		mStop.Hide()
+
+		// Visual separator between project groups.
+		mSep := systray.AddMenuItem("────────────────────────────────", "")
+		mSep.Disable()
+		mSep.Hide()
 
 		s := &projectSlot{
-			parent:   parent,
+			mHeader:  mHeader,
 			mCopyLog: mCopyLog,
 			mCopyMet: mCopyMet,
 			mOpenDir: mOpenDir,
 			mStop:    mStop,
+			mSep:     mSep,
 		}
 		m.slots[i] = s
 		go m.runSlotHandler(s)
 	}
 
-	// Separator then Quit.
+	// Separator then Quit at the bottom.
 	systray.AddSeparator()
 	m.mQuit = systray.AddMenuItem("Quit", "Stop the SuitCode coordinator")
 
@@ -236,8 +262,8 @@ func (m *trayMenu) updateProjects(projects []coord.ProjectInfo) {
 }
 
 // runSlotHandler loops over action-item click events for one project slot.
-// Runs in a dedicated goroutine per slot — blocking operations (clipboard
-// writes, HTTP calls) are safe here because they don't affect other slots.
+// Each slot has a dedicated goroutine so blocking operations (clipboard
+// writes, HTTP calls) do not stall other slots or the tray event loop.
 func (m *trayMenu) runSlotHandler(s *projectSlot) {
 	for {
 		select {
@@ -355,34 +381,50 @@ func (m *trayMenu) refreshStatus() {
 
 // ── projectSlot helpers ───────────────────────────────────────────────────────
 
-// setProjectInfo updates the slot with live project data and shows the parent
-// sub-menu. The title is the full project path so users can distinguish
-// multiple simultaneous investigators.
+// setProjectInfo updates the slot with live project data and reveals all
+// group items so the user can see and interact with the investigator.
 func (s *projectSlot) setProjectInfo(info coord.ProjectInfo) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	s.projectPath = info.ProjectPath
 	s.projectInfo = info
+	s.mu.Unlock()
 
 	if info.ProjectPath == "" {
-		s.parent.Hide()
+		s.hideAll()
 		return
 	}
 
-	s.parent.SetTitle(info.ProjectPath)
-	s.parent.SetTooltip(fmt.Sprintf("port %d · started %s", info.Port, info.StartedAt))
-	s.parent.Show()
+	// Update header text to the full project path.
+	s.mHeader.SetTitle(info.ProjectPath)
+
+	// Reveal the entire group.
+	s.mHeader.Show()
+	s.mCopyLog.Show()
+	s.mCopyMet.Show()
+	s.mOpenDir.Show()
+	s.mStop.Show()
+	s.mSep.Show()
 }
 
 // clearProject hides the slot, removing it from the visible menu.
 func (s *projectSlot) clearProject() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	s.projectPath = ""
 	s.projectInfo = coord.ProjectInfo{}
-	s.parent.Hide()
+	s.mu.Unlock()
+
+	s.hideAll()
+}
+
+// hideAll hides every menu item in this slot. Thread-safe (systray ops are
+// channel-based); does not need the slot mutex.
+func (s *projectSlot) hideAll() {
+	s.mHeader.Hide()
+	s.mCopyLog.Hide()
+	s.mCopyMet.Hide()
+	s.mOpenDir.Hide()
+	s.mStop.Hide()
+	s.mSep.Hide()
 }
 
 func (s *projectSlot) getProject() string {

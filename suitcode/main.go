@@ -788,6 +788,16 @@ func newContextCmd(repoPath string) *cobra.Command {
 				saved := int((1 - resp.CompressionRatio) * 100)
 				fmt.Printf("Context capsule: %d files · %d/%d tokens (%d%% saved)\n",
 					resp.FilesIncluded, resp.Metrics.Budget.Used, resp.Metrics.Budget.Requested, saved)
+
+				// Print per-file inclusion summary so agents can verify capsule contents.
+				for _, f := range resp.Files {
+					fmt.Printf("  included  %-6d tok  %s\n", f.TokenEstimate, f.RelPath)
+				}
+
+				// Print any files that were considered but excluded.
+				for _, r := range resp.Capsule.Rejections {
+					fmt.Printf("  excluded              %s — %s\n", r.Candidate.File.RelPath, r.Reason)
+				}
 			}, func() {
 				printCallLog("context", resp.BaseFeatureResponse, resp.FilesIncluded, resp.FilesConsidered, resp.CompressionRatio)
 			})
