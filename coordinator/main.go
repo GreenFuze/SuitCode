@@ -6,6 +6,7 @@
 //   - Spawns investigators on demand when a suitcode client request arrives
 //   - Proxies feature requests to the correct investigator using the
 //     X-Suitcode-Project header for routing
+//   - Displays a system-tray icon when built with -tags systray
 //
 // Usage:
 //
@@ -14,8 +15,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -38,30 +41,52 @@ func main() {
 	logf("using investigator binary: %s", inv)
 
 	coord := NewCoordinator(*port, inv)
+	coordinatorURL := fmt.Sprintf("http://127.0.0.1:%d", *port)
 
-	// Graceful shutdown on SIGINT / SIGTERM.
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+	// Context driven by OS signals so both the HTTP server and the tray react
+	// consistently to SIGINT / SIGTERM.
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
 
-	errCh := make(chan error, 1)
+	// Start the HTTP server in the background. ErrServerClosed is expected
+	// during clean shutdown and is filtered out.
+	serverDone := make(chan error, 1)
 	go func() {
-		errCh <- coord.Start()
+		if err := coord.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serverDone <- err
+		}
+		close(serverDone)
 	}()
 
+	// runTray blocks on the main goroutine when built with -tags systray.
+	// On headless builds it returns immediately. In both cases it calls
+	// cancel() before returning so the shutdown path below always runs.
+	runTray(ctx, coordinatorURL, cancel)
+
+	// Wait for either context cancellation (signal or tray quit) or a fatal
+	// server startup failure.
 	select {
-	case sig := <-stop:
-		logf("received signal %s — shutting down", sig)
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := coord.Shutdown(ctx); err != nil {
-			logf("shutdown error: %v", err)
-		}
-	case err := <-errCh:
+	case <-ctx.Done():
+		// Normal shutdown — signal received or tray dismissed.
+	case err := <-serverDone:
 		if err != nil {
-			logf("FATAL: %v", err)
+			logf("FATAL: server error: %v", err)
 			os.Exit(1)
 		}
+		// Server exited cleanly without a signal.
+		return
 	}
+
+	logf("shutting down...")
+	shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutCancel()
+	if err := coord.Shutdown(shutCtx); err != nil {
+		logf("shutdown error: %v", err)
+	}
+
+	// Wait for the server goroutine to finish so we don't exit with open
+	// resources. ErrServerClosed is already filtered inside the goroutine.
+	<-serverDone
 }
 
 // resolveInvestigatorBinary returns the path to the investigator binary.
