@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	cfeatures "github.com/GreenFuze/SuitCode/core/features"
 	"github.com/GreenFuze/SuitCode/core/provider"
@@ -64,6 +65,9 @@ func RunVerifyPlan(
 	isGo := containsAny(listing.Data.BuildSystems, "Go Modules")
 	isNPM := containsAny(listing.Data.BuildSystems, "npm")
 	isPython := containsAny(listing.Data.BuildSystems, "Poetry", "pip", "Pipenv")
+	// MSBuild may be detected via root markers (global.json etc.) OR by the
+	// presence of .csproj/.sln files anywhere in the tree.
+	isDotNet := containsAny(listing.Data.BuildSystems, "MSBuild") || hasDotNetProject(listing.Data.Files)
 
 	commandsConsidered := 0
 
@@ -172,8 +176,51 @@ func RunVerifyPlan(
 		)
 	}
 
+	if isDotNet {
+		commandsConsidered += 2
+
+		// Find the solution file (prefer one at the repo root).
+		slnFile := findDotNetSolution(listing.Data.Files)
+
+		buildArgs := []string{"build"}
+		if slnFile != "" {
+			buildArgs = append(buildArgs, slnFile)
+		}
+		resp.Commands = append(resp.Commands, cfeatures.VerificationCommand{
+			Command:  "dotnet",
+			Args:     buildArgs,
+			Reason:   "compile the .NET solution / project",
+			Kind:     "build",
+			Required: true,
+			Provenance: provider.Provenance{
+				SourceKind:      provider.SourceKindManifest,
+				SourceTool:      "csproj",
+				Authority:       provider.AuthorityVerified,
+				EvidenceSummary: ".csproj / .sln files detected in repository",
+			},
+		})
+
+		// Add dotnet test only when test projects are present.
+		if hasDotNetTestProject(listing.Data.Files) {
+			resp.Commands = append(resp.Commands, cfeatures.VerificationCommand{
+				Command:           "dotnet",
+				Args:              []string{"test"},
+				Reason:            "run the .NET test suite",
+				Kind:              "test",
+				Required:          true,
+				EstimatedCostHint: "medium",
+				Provenance: provider.Provenance{
+					SourceKind:      provider.SourceKindManifest,
+					SourceTool:      "csproj",
+					Authority:       provider.AuthorityVerified,
+					EvidenceSummary: "test project (.Tests/.Test/.Specs) detected",
+				},
+			})
+		}
+	}
+
 	// If no build system was detected, add a generic note.
-	if !isGo && !isNPM && !isPython {
+	if !isGo && !isNPM && !isPython && !isDotNet {
 		resp.Limitations = append(resp.Limitations, provider.Limitation{
 			Kind:    "unknown_build_system",
 			Message: "no known build system detected; cannot generate verification commands",
@@ -215,5 +262,48 @@ func containsAny(slice []string, values ...string) bool {
 		}
 	}
 	return false
+}
+
+// hasDotNetProject returns true when any file in the listing has a .NET project
+// extension (.csproj, .fsproj, .vbproj, .sln). Used as a fallback when the
+// MSBuild root-file markers (global.json etc.) are absent.
+func hasDotNetProject(files []provider.FilesystemFile) bool {
+	for _, f := range files {
+		switch strings.ToLower(filepath.Ext(f.RelPath)) {
+		case ".csproj", ".fsproj", ".vbproj", ".sln":
+			return true
+		}
+	}
+	return false
+}
+
+// hasDotNetTestProject returns true when any .csproj path contains a common
+// test-project naming convention (Tests, Test, Specs, Spec).
+func hasDotNetTestProject(files []provider.FilesystemFile) bool {
+	for _, f := range files {
+		if strings.ToLower(filepath.Ext(f.RelPath)) != ".csproj" {
+			continue
+		}
+		base := strings.ToLower(filepath.Base(f.RelPath))
+		if strings.Contains(base, "test") || strings.Contains(base, "spec") {
+			return true
+		}
+	}
+	return false
+}
+
+// findDotNetSolution returns the relative path of the first .sln file found,
+// preferring one in the repository root (shortest path). Returns "" when none exists.
+func findDotNetSolution(files []provider.FilesystemFile) string {
+	best := ""
+	for _, f := range files {
+		if strings.ToLower(filepath.Ext(f.RelPath)) != ".sln" {
+			continue
+		}
+		if best == "" || len(f.RelPath) < len(best) {
+			best = f.RelPath
+		}
+	}
+	return best
 }
 

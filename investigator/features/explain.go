@@ -120,6 +120,16 @@ func RunExplainFile(
 	resp.Imports = imports
 	resp.Limitations = append(resp.Limitations, importLims...)
 
+	// Populate Dependents (files that import this file) from the import graph.
+	// This does not require Roslyn — it is a pure graph lookup.
+	if langProv != nil && langProv.Ready() {
+		importersResult, impErr := langProv.FileImporters(ctx, fsFile.Path)
+		if impErr == nil && importersResult != nil {
+			resp.Dependents = absPathsToImportRefs(importersResult.Data, listing, "import-graph-provider")
+			resp.Limitations = append(resp.Limitations, importersResult.Limitations...)
+		}
+	}
+
 	// Find test files for this source file.
 	testFiles := testFilesForSource(listing, fsFile.RelPath)
 	for _, tf := range testFiles {

@@ -103,7 +103,7 @@ func (r *Registry) GetOrSpawn(ctx context.Context, projectPath string) (*Investi
 	}
 
 	// Spawn a new investigator.
-	proc, err := r.spawn(ctx, projectPath)
+	proc, err := r.spawn(projectPath)
 	if err != nil {
 		return nil, fmt.Errorf("registry: spawn investigator for %q: %w", projectPath, err)
 	}
@@ -194,8 +194,9 @@ func (r *Registry) Shutdown() {
 // ──────────────────────────────────────────────────────────────────────────────
 
 // spawn allocates a free port and starts investigator <projectPath> serve --port <port>
-// [--coordinator-url <url>].
-func (r *Registry) spawn(ctx context.Context, projectPath string) (*InvestigatorProcess, error) {
+// [--coordinator-url <url>]. The spawned process uses context.Background() so its
+// lifetime is never tied to a caller's request context.
+func (r *Registry) spawn(projectPath string) (*InvestigatorProcess, error) {
 	port, err := allocFreePort()
 	if err != nil {
 		return nil, fmt.Errorf("alloc port: %w", err)
@@ -208,7 +209,11 @@ func (r *Registry) spawn(ctx context.Context, projectPath string) (*Investigator
 		args = append(args, "--coordinator-url", r.coordinatorURL)
 	}
 
-	cmd := exec.CommandContext(ctx, r.invBinary, args...)
+	// Use context.Background() — NOT the request ctx — so the investigator's
+	// lifetime is decoupled from any individual HTTP request. When a request
+	// completes its context is cancelled, and exec.CommandContext would kill the
+	// child immediately. Shutdown is handled explicitly via Stop/Shutdown.
+	cmd := exec.CommandContext(context.Background(), r.invBinary, args...)
 	// Stdio is intentionally nil — investigator writes its own [sc investigator] logs to stderr.
 	// We don't capture them here; they appear in the coordinator's terminal.
 	if err := cmd.Start(); err != nil {

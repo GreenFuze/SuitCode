@@ -407,11 +407,15 @@ func newExplainFileCmd(repoPath string) *cobra.Command {
 	var format string
 
 	cmd := &cobra.Command{
-		Use:   "explain-file",
+		Use:   "explain-file [path]",
 		Short: "Explain a file's role, imports, tests, and relationships",
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// Accept the file path as a positional argument when --path is not set.
+			if path == "" && len(args) > 0 {
+				path = args[0]
+			}
 			if path == "" {
-				return fmt.Errorf("--path is required")
+				return fmt.Errorf("--path is required (or pass the file path as a positional argument, e.g. explain-file src/Foo.cs)")
 			}
 
 			stopCoord := logProgress("connecting to coordinator...")
@@ -456,11 +460,15 @@ func newSymbolsCmd(repoPath string) *cobra.Command {
 	var format string
 
 	cmd := &cobra.Command{
-		Use:   "symbols",
+		Use:   "symbols [path]",
 		Short: "List symbols defined in a specific file (functions, types, variables, constants)",
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// Accept the file path as a positional argument when --path is not set.
+			if path == "" && len(args) > 0 {
+				path = args[0]
+			}
 			if path == "" {
-				return fmt.Errorf("--path is required")
+				return fmt.Errorf("--path is required (or pass the file path as a positional argument, e.g. symbols src/Foo.cs)")
 			}
 
 			stopCoord := logProgress("connecting to coordinator...")
@@ -1004,6 +1012,10 @@ func printFeatureResult[T any](resp *T, format string, brief func(*T), logCallFn
 	return nil
 }
 
+// knownFormatNames is the set of strings that are valid --format values.
+// Used to detect the common mistake of writing --output json instead of --format json.
+var knownFormatNames = map[string]bool{"json": true, "markdown": true, "md": true}
+
 // writeJSON pretty-prints any value as indented JSON. When --output is set the
 // output goes to that file (created/truncated); otherwise it goes to stdout.
 // Using --output sidesteps PowerShell's "pipe being closed" error when piping
@@ -1011,6 +1023,17 @@ func printFeatureResult[T any](resp *T, format string, brief func(*T), logCallFn
 func writeJSON(v any) error {
 	out := os.Stdout
 	if outputFile != "" {
+		// Warn when --output looks like a format name — a common mistake is
+		// writing "--output json" when "--format json" was intended.
+		if knownFormatNames[strings.ToLower(outputFile)] {
+			fmt.Fprintf(os.Stderr,
+				"warn: --output %q looks like a format name, not a file path.\n"+
+					"  Output is being written to a file literally named %q.\n"+
+					"  If you meant formatted output on stdout, use: --format %s\n"+
+					"  If you meant formatted output to a file, use: --format %s --output <filename>\n",
+				outputFile, outputFile, outputFile, outputFile)
+		}
+
 		f, err := os.Create(outputFile)
 		if err != nil {
 			return fmt.Errorf("--output: cannot create %q: %w", outputFile, err)

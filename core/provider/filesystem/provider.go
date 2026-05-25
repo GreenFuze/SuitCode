@@ -96,6 +96,9 @@ var buildSystemMarkers = map[string][]string{
 	"sbt":            {"build.sbt"},
 	"Docker":         {"Dockerfile"},
 	"Docker Compose": {"docker-compose.yml", "docker-compose.yaml"},
+	// MSBuild/dotnet: global.json pins the SDK version and is almost always at
+	// the repo root; Directory.Build.props is a common cross-project config file.
+	"MSBuild": {"global.json", "Directory.Build.props", "Directory.Build.targets", "NuGet.Config"},
 }
 
 // deepBuildSystemMarkers detects modern bundlers and build tools that typically
