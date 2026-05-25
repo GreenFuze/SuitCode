@@ -77,13 +77,17 @@ func (t *tray) onReady() {
 	systray.SetTitle("SuitCode")
 	systray.SetTooltip("SuitCode — repository intelligence")
 
-	// Set the icon after a short delay. On Windows, Shell_NotifyIcon(NIM_MODIFY)
-	// can fail with ERROR_SUCCESS if called immediately after NIM_ADD —
-	// the shell notification area isn't fully ready yet. Deferring by 200 ms
-	// avoids the spurious "unable to set icon" log message.
+	// Pre-compute the icon once (box-filter is not free).
+	icon := trayIcon()
+
+	// Set the icon immediately, then retry after the shell has settled.
+	// On Windows, Shell_NotifyIcon(NIM_MODIFY) can return ERROR_SUCCESS (i.e.
+	// succeed but be a no-op) if the notification area hasn't fully registered
+	// the new icon entry yet. A second call after ~1 s ensures the HICON lands.
+	systray.SetIcon(icon)
 	go func() {
-		time.Sleep(200 * time.Millisecond)
-		systray.SetIcon(trayIcon())
+		time.Sleep(1 * time.Second)
+		systray.SetIcon(icon)
 	}()
 
 	// Build menu structure.
@@ -119,6 +123,10 @@ type trayMenu struct {
 	// mStatus is a permanently disabled item showing coordinator connectivity.
 	mStatus *systray.MenuItem
 
+	// mNoProjects is shown when no investigator projects are active. It is
+	// hidden whenever at least one project slot is visible.
+	mNoProjects *systray.MenuItem
+
 	// slots are pre-allocated project rows; unused ones are hidden.
 	slots [maxProjectSlots]*projectSlot
 
@@ -143,6 +151,12 @@ func (m *trayMenu) build() {
 	// Status row — always visible, never clickable.
 	m.mStatus = systray.AddMenuItem("SuitCode — connecting...", "Coordinator connection status")
 	m.mStatus.Disable()
+
+	// Placeholder shown when no investigators are running. Starts visible
+	// because we haven't fetched project state yet; updateProjects hides it
+	// once any project slot becomes active.
+	m.mNoProjects = systray.AddMenuItem("No active projects — run 'suitcode <path> warmup'", "")
+	m.mNoProjects.Disable()
 
 	// Pre-allocate project slots, all initially hidden.
 	for i := range m.slots {
@@ -181,6 +195,16 @@ func (m *trayMenu) updateProjects(projects []coord.ProjectInfo) {
 			s.setProject("")
 		}
 	}
+
+	// Show the "no active projects" placeholder only when every slot is empty.
+	if m.mNoProjects == nil {
+		return
+	}
+	if len(projects) == 0 {
+		m.mNoProjects.Show()
+	} else {
+		m.mNoProjects.Hide()
+	}
 }
 
 // runSlotHandler loops over click events for one project slot. A click stops
@@ -210,7 +234,8 @@ func (m *trayMenu) runSlotHandler(s *projectSlot) {
 	}
 }
 
-// refreshStatus recomputes the status text from currently visible slots.
+// refreshStatus recomputes the status text and no-projects placeholder from
+// currently visible slots. Safe from any goroutine.
 func (m *trayMenu) refreshStatus() {
 	count := 0
 	for _, s := range m.slots {
@@ -218,7 +243,17 @@ func (m *trayMenu) refreshStatus() {
 			count++
 		}
 	}
+
 	m.updateStatus(fmt.Sprintf("Coordinator: online · %d project(s)", count))
+
+	// Mirror placeholder visibility.
+	if m.mNoProjects != nil {
+		if count == 0 {
+			m.mNoProjects.Show()
+		} else {
+			m.mNoProjects.Hide()
+		}
+	}
 }
 
 // setProject updates the slot to display the given path, or hides it if empty.
@@ -313,31 +348,34 @@ func (p *trayPoller) poll() {
 
 // ── Icon ──────────────────────────────────────────────────────────────────────
 
-// trayIconSize is the edge length of the PNG passed to systray. Windows will
-// use this as the HICON source; 256 px gives crisp rendering at every DPI.
-const trayIconSize = 256
+// trayIconSize is the pixel edge-length of the icon frame embedded in the ICO
+// container. 32 is the Windows standard notification-area size (SM_CXICON at
+// 96 DPI). Windows scales it for higher-DPI displays automatically.
+const trayIconSize = 32
 
-// trayIcon decodes the embedded assets/icon.png, down-samples it to
-// trayIconSize × trayIconSize using a box filter, and returns the result as
-// a fresh PNG byte slice. The original source may be any size ≥ trayIconSize.
+// trayIcon decodes the embedded assets/icon.png, box-filter-resizes it to
+// trayIconSize × trayIconSize, and returns the result wrapped in an ICO
+// container.
+//
+// WHY ICO? fyne.io/systray on Windows writes the bytes to a temp file then
+// calls LoadImageW(IMAGE_ICON, LR_LOADFROMFILE). LoadImageW identifies the
+// format by magic bytes, and IMAGE_ICON only accepts the ICO magic header
+// (0x00 0x00 0x01 0x00). A raw PNG is silently rejected, yielding a null
+// HICON and a blank tray slot. ICO frames can be either DIB or PNG data
+// (detected automatically by the frame's magic bytes), so we produce a
+// single-frame ICO that wraps our PNG.
 func trayIcon() []byte {
 	src, _, err := image.Decode(bytes.NewReader(iconPNG))
 	if err != nil {
-		// Fallback: return the raw embedded bytes unchanged.
+		logf("warn: tray: cannot decode icon: %v", err)
 		return iconPNG
 	}
 
-	// Down-sample only if the source is larger than the target.
+	// Resize to trayIconSize × trayIconSize with a box filter.
 	srcBounds := src.Bounds()
 	sw, sh := srcBounds.Dx(), srcBounds.Dy()
-	if sw <= trayIconSize && sh <= trayIconSize {
-		return iconPNG
-	}
-
-	// Box-filter: for each output pixel, average every source pixel that falls
-	// inside its mapped source rectangle. Gives much better quality than
-	// nearest-neighbour for large reductions (e.g. 1080 → 256).
 	dst := image.NewNRGBA(image.Rect(0, 0, trayIconSize, trayIconSize))
+
 	scaleX := float64(sw) / trayIconSize
 	scaleY := float64(sh) / trayIconSize
 
@@ -355,35 +393,93 @@ func trayIcon() []byte {
 				sx1 = sw - 1
 			}
 
-			// Accumulate linear RGBA over the source box.
-			var rSum, gSum, bSum, aSum float64
+			// Average all source pixels inside this output pixel's box.
+			var rS, gS, bS, aS float64
 			n := 0
 			for sy := sy0; sy <= sy1; sy++ {
 				for sx := sx0; sx <= sx1; sx++ {
 					cr, cg, cb, ca := src.At(sx, sy).RGBA()
-					rSum += float64(cr >> 8)
-					gSum += float64(cg >> 8)
-					bSum += float64(cb >> 8)
-					aSum += float64(ca >> 8)
+					rS += float64(cr >> 8)
+					gS += float64(cg >> 8)
+					bS += float64(cb >> 8)
+					aS += float64(ca >> 8)
 					n++
 				}
 			}
-
 			if n > 0 {
 				fn := float64(n)
 				dst.SetNRGBA(ox, oy, color.NRGBA{
-					R: uint8(rSum / fn),
-					G: uint8(gSum / fn),
-					B: uint8(bSum / fn),
-					A: uint8(aSum / fn),
+					R: uint8(rS / fn),
+					G: uint8(gS / fn),
+					B: uint8(bS / fn),
+					A: uint8(aS / fn),
 				})
 			}
 		}
 	}
 
-	var buf bytes.Buffer
-	if err := png.Encode(&buf, dst); err != nil {
+	// Encode the resized image as PNG.
+	var pngBuf bytes.Buffer
+	if err := png.Encode(&pngBuf, dst); err != nil {
+		logf("warn: tray: cannot encode icon: %v", err)
 		return iconPNG
 	}
-	return buf.Bytes()
+
+	// Wrap the PNG in a single-frame ICO container so LoadImageW accepts it.
+	return pngToICO(pngBuf.Bytes(), trayIconSize, trayIconSize)
+}
+
+// pngToICO wraps raw PNG bytes in a minimal single-frame ICO container.
+//
+// ICO layout:
+//
+//	[0]  ICONDIR     (6 bytes)  — magic 0x00000100 + image count
+//	[6]  ICONDIRENTRY (16 bytes) — dimensions, bit-depth, data size, data offset
+//	[22] <pngBytes>             — the PNG frame (detected by its own magic bytes)
+//
+// The ICO spec allows image frames to be either DIB (BMP) or PNG data.
+// Windows detects which by the frame's own magic bytes, so no special flag is
+// needed — we just place the PNG bytes at the declared offset.
+func pngToICO(pngBytes []byte, w, h int) []byte {
+	const headerLen = 6
+	const dirEntryLen = 16
+	dataOffset := uint32(headerLen + dirEntryLen)
+	dataLen := uint32(len(pngBytes))
+
+	// Clamp width/height to the ICO directory byte field (0 encodes as 256).
+	wb := byte(w)
+	hb := byte(h)
+
+	buf := make([]byte, headerLen+dirEntryLen+int(dataLen))
+
+	// ICONDIR header.
+	buf[0] = 0        // reserved
+	buf[1] = 0        // reserved
+	buf[2] = 1        // type: 1 = icon
+	buf[3] = 0        //
+	buf[4] = 1        // image count (low byte)
+	buf[5] = 0        // image count (high byte)
+
+	// ICONDIRENTRY.
+	buf[6] = wb       // width
+	buf[7] = hb       // height
+	buf[8] = 0        // colour count (0 = >8-bit)
+	buf[9] = 0        // reserved
+	buf[10] = 1       // planes (low)
+	buf[11] = 0       // planes (high)
+	buf[12] = 32      // bits per pixel (low) — 32-bit RGBA
+	buf[13] = 0       // bits per pixel (high)
+	// data size (4 bytes LE)
+	buf[14] = byte(dataLen)
+	buf[15] = byte(dataLen >> 8)
+	buf[16] = byte(dataLen >> 16)
+	buf[17] = byte(dataLen >> 24)
+	// data offset from start of file (4 bytes LE)
+	buf[18] = byte(dataOffset)
+	buf[19] = byte(dataOffset >> 8)
+	buf[20] = byte(dataOffset >> 16)
+	buf[21] = byte(dataOffset >> 24)
+
+	copy(buf[22:], pngBytes)
+	return buf
 }

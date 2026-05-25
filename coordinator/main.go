@@ -32,6 +32,19 @@ func main() {
 	invBinary := flag.String("investigator", "", "path to the investigator binary (default: auto-detect)")
 	flag.Parse()
 
+	// Refuse to start if another coordinator is already running on this port.
+	// On Windows GUI builds showErrorDialog pops a native MessageBox; on all
+	// other builds logf writes to stderr.
+	if running, existingURL := checkAlreadyRunning(*port); running {
+		msg := fmt.Sprintf(
+			"A SuitCode coordinator is already running at %s.\n\nOnly one instance can run at a time.",
+			existingURL,
+		)
+		logf("FATAL: %s", msg)
+		showErrorDialog(msg)
+		os.Exit(1)
+	}
+
 	// Resolve the investigator binary path.
 	inv, err := resolveInvestigatorBinary(*invBinary)
 	if err != nil {
