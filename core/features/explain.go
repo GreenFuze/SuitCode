@@ -39,6 +39,11 @@ type ExplainFileResponse struct {
 
 	// FileTokenEstimate is the estimated token cost of the file itself.
 	FileTokenEstimate provider.TokenEstimate
+
+	// ExternalDependencies lists external package dependencies for the project
+	// containing this file (e.g. NuGet packages from the .csproj). Populated only
+	// when a package-aware language provider is ready.
+	ExternalDependencies []ExternalDependency
 }
 
 // SymbolInfo describes a single symbol exported from a file.
@@ -47,4 +52,15 @@ type SymbolInfo struct {
 	Kind       string // "func", "type", "var", "const", "interface", "struct"
 	Signature  string // brief signature or type, if available
 	Provenance provider.Provenance
+}
+
+// ExternalDependency is a declared external package dependency associated with
+// the file being explained (e.g. a NuGet package from the containing .csproj).
+type ExternalDependency struct {
+	// Manager is the package manager: "NuGet", "npm", "pip", etc.
+	Manager string
+	// Name is the package name as declared in the manifest.
+	Name string
+	// Version is the declared version constraint (empty when not specified).
+	Version string
 }

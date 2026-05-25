@@ -144,6 +144,16 @@ func (m *MultiLangProvider) CSReady() bool {
 	return m.csProvider != nil && m.csProvider.Ready()
 }
 
+// GetCSPackageRefs returns the NuGet package references for the project
+// containing filePath, via the C# provider. Returns nil when no C# provider
+// is active or filePath does not belong to a tracked C# project.
+func (m *MultiLangProvider) GetCSPackageRefs(filePath string) []csprovider.PackageRef {
+	if m.csProvider == nil {
+		return nil
+	}
+	return m.csProvider.GetPackageRefs(filePath)
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // provider.Provider implementation
 // ──────────────────────────────────────────────────────────────────────────────

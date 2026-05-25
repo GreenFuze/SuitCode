@@ -33,6 +33,12 @@ var csSourceExts = map[string]bool{
 	".xaml":  true,
 }
 
+// PackageRef is one <PackageReference> entry from a .csproj file.
+type PackageRef struct {
+	Name    string // e.g. "Avalonia.Controls.ItemsRepeater"
+	Version string // e.g. "12.0.0" — empty when not declared
+}
+
 // csImportIndex is the in-memory bidirectional file-level import graph for a C# repo.
 // All maps use absolute file paths as keys. Immutable after construction.
 type csImportIndex struct {
@@ -47,26 +53,36 @@ type csImportIndex struct {
 	// partners maps .axaml → .axaml.cs and vice-versa (Avalonia code-behind pairs).
 	partners map[string]string
 
+	// filePackageRefs maps abs source file path → NuGet package refs from its
+	// containing project's <PackageReference> elements.
+	filePackageRefs map[string][]PackageRef
+
 	// sourceFileCount is the total number of C#/XAML source files indexed across all projects.
 	sourceFileCount int
 }
 
 // csprojXML is the minimal XML shape we unmarshal from a .csproj file.
-// SDK-style project files nest <ProjectReference> elements inside <ItemGroup> elements.
+// SDK-style project files nest <ProjectReference> and <PackageReference> elements
+// inside <ItemGroup> elements.
 type csprojXML struct {
 	ItemGroups []struct {
 		ProjectRefs []struct {
 			Include string `xml:"Include,attr"`
 		} `xml:"ProjectReference"`
+		PackageRefs []struct {
+			Include string `xml:"Include,attr"`
+			Version string `xml:"Version,attr"`
+		} `xml:"PackageReference"`
 	} `xml:"ItemGroup"`
 }
 
 // csProjectDef describes one .csproj: its location, referenced projects, and owned files.
 type csProjectDef struct {
-	absPath     string   // absolute path to the .csproj file
-	dir         string   // directory containing the .csproj (base for implicit SDK includes)
-	projectRefs []string // absolute paths of referenced .csproj files
-	sourceFiles []string // absolute paths of .cs/.axaml/.xaml files owned by this project
+	absPath     string       // absolute path to the .csproj file
+	dir         string       // directory containing the .csproj (base for implicit SDK includes)
+	projectRefs []string     // absolute paths of referenced .csproj files
+	sourceFiles []string     // absolute paths of .cs/.axaml/.xaml files owned by this project
+	packageRefs []PackageRef // NuGet <PackageReference> items declared in this .csproj
 }
 
 // buildCSImportGraph walks repoPath, discovers all .csproj files, parses their
@@ -84,9 +100,10 @@ func buildCSImportGraph(repoPath string) (*csImportIndex, []provider.Limitation,
 	}
 
 	idx := &csImportIndex{
-		fileImports:   make(map[string][]string),
-		fileImporters: make(map[string][]string),
-		partners:      make(map[string]string),
+		fileImports:     make(map[string][]string),
+		fileImporters:   make(map[string][]string),
+		partners:        make(map[string]string),
+		filePackageRefs: make(map[string][]PackageRef),
 	}
 
 	if len(csprojFiles) == 0 {
@@ -125,6 +142,23 @@ func buildCSImportGraph(repoPath string) (*csImportIndex, []provider.Limitation,
 
 	if idx.sourceFileCount == 0 {
 		return idx, limitations, nil
+	}
+
+	// Step 3b: Populate filePackageRefs — map both the .csproj file itself and
+	// every source file it owns to the project's NuGet package references.
+	for _, proj := range projects {
+		if len(proj.packageRefs) == 0 {
+			continue
+		}
+
+		// The .csproj file itself is also a valid lookup key (e.g. when the agent
+		// runs explain-file on the .csproj directly).
+		idx.filePackageRefs[proj.absPath] = proj.packageRefs
+
+		// Every source file owned by this project inherits the same package refs.
+		for _, f := range proj.sourceFiles {
+			idx.filePackageRefs[f] = proj.packageRefs
+		}
 	}
 
 	// Step 4: Build the bidirectional file-level graph from project-level references.
@@ -233,6 +267,17 @@ func parseCSProj(csprojPath, repoPath string, projectDirs map[string]bool) (*csP
 			if rel, relErr := filepath.Rel(repoPath, abs); relErr == nil && !strings.HasPrefix(rel, "..") {
 				proj.projectRefs = append(proj.projectRefs, abs)
 			}
+		}
+
+		// Collect <PackageReference Include="..." Version="..."> entries.
+		for _, pkg := range ig.PackageRefs {
+			if pkg.Include == "" {
+				continue
+			}
+			proj.packageRefs = append(proj.packageRefs, PackageRef{
+				Name:    pkg.Include,
+				Version: pkg.Version,
+			})
 		}
 	}
 

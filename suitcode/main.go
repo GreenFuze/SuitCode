@@ -77,6 +77,13 @@ COMMANDS:
                    exported symbols for a single file.
                      --path <file>  [required]
 
+  symbols          Symbols defined in a specific file: functions, types,
+                   variables, constants. Uses gopls for Go, Roslyn for C#
+                   (when available). Returns a "not_implemented" limitation
+                   for languages without a symbol server.
+                     --path <file>  [required]
+                     --filter <pattern>  case-insensitive substring match
+
   related          Files most related to a seed file, ranked by import-graph
                    proximity and naming heuristics.
                      --path <file>  [required]
@@ -262,6 +269,7 @@ func newRootCmd(repoPath string) *cobra.Command {
 		newWarmupCmd(repoPath),
 		newRepoOverviewCmd(repoPath),
 		newExplainFileCmd(repoPath),
+		newSymbolsCmd(repoPath),
 		newRelatedCmd(repoPath),
 		newTestsCmd(repoPath),
 		newImpactCmd(repoPath),
@@ -439,6 +447,124 @@ func newExplainFileCmd(repoPath string) *cobra.Command {
 	cmd.Flags().StringVar(&path, "path", "", "file path to explain [required]")
 	cmd.Flags().IntVar(&budget, "budget", 0, "maximum estimated token budget")
 	cmd.Flags().StringVar(&format, "format", "", "output format: json (default: brief summary)")
+	return cmd
+}
+
+func newSymbolsCmd(repoPath string) *cobra.Command {
+	var path string
+	var filter string
+	var format string
+
+	cmd := &cobra.Command{
+		Use:   "symbols",
+		Short: "List symbols defined in a specific file (functions, types, variables, constants)",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if path == "" {
+				return fmt.Errorf("--path is required")
+			}
+
+			stopCoord := logProgress("connecting to coordinator...")
+			client, err := readyClient(repoPath)
+			stopCoord()
+			if err != nil {
+				return err
+			}
+
+			// Reuse ExplainFile — it already fetches symbols via the language providers.
+			req := cfeatures.ExplainFileRequest{
+				BaseFeatureRequest: cfeatures.BaseFeatureRequest{
+					RepoPath: repoPath, Format: cfeatures.OutputFormat(format),
+				},
+				FilePath: path,
+			}
+
+			stopFeature := logProgress(fmt.Sprintf("fetching symbols for %s...", path))
+			resp, err := client.ExplainFile(cmd.Context(), req)
+			stopFeature()
+			if err != nil {
+				return err
+			}
+
+			// Apply optional case-insensitive substring filter to the symbol list.
+			symbols := resp.Symbols
+			if filter != "" {
+				filterLower := strings.ToLower(filter)
+				filtered := symbols[:0]
+				for _, s := range symbols {
+					if strings.Contains(strings.ToLower(s.Name), filterLower) {
+						filtered = append(filtered, s)
+					}
+				}
+				symbols = filtered
+			}
+
+			if format == "json" {
+				// Emit only the symbols-relevant fields to keep the output focused.
+				type symbolsOutput struct {
+					FilePath             string                       `json:"file_path"`
+					Language             string                       `json:"language"`
+					Symbols              []cfeatures.SymbolInfo       `json:"symbols"`
+					ExternalDependencies []cfeatures.ExternalDependency `json:"external_dependencies,omitempty"`
+					Limitations          []any                        `json:"limitations,omitempty"`
+				}
+
+				// Build limitations from the base response.
+				var lims []any
+				for _, l := range resp.BaseFeatureResponse.Limitations {
+					lims = append(lims, l)
+				}
+
+				out := symbolsOutput{
+					FilePath:             resp.FilePath,
+					Language:             resp.Language,
+					Symbols:              symbols,
+					ExternalDependencies: resp.ExternalDependencies,
+					Limitations:          lims,
+				}
+				if logCalls {
+					printCallLog("symbols", resp.BaseFeatureResponse, 0, 0, 0)
+				}
+				return writeJSON(out)
+			}
+
+			// Brief (non-JSON) mode: print each matching symbol name to stdout.
+			printProgress(resp.BaseFeatureResponse)
+
+			if len(symbols) == 0 {
+				// When no symbols but NuGet packages are present, surface them.
+				if len(resp.ExternalDependencies) > 0 {
+					fmt.Printf("No source symbols found. Project NuGet packages:")
+					for _, dep := range resp.ExternalDependencies {
+						if dep.Version != "" {
+							fmt.Printf(" %s@%s", dep.Name, dep.Version)
+						} else {
+							fmt.Printf(" %s", dep.Name)
+						}
+					}
+					fmt.Println()
+				} else {
+					fmt.Printf("No symbols found in %s\n", filepath.Base(path))
+				}
+			} else {
+				for _, s := range symbols {
+					if s.Kind != "" {
+						fmt.Printf("%s %s\n", s.Kind, s.Name)
+					} else {
+						fmt.Println(s.Name)
+					}
+				}
+			}
+
+			if logCalls {
+				printCallLog("symbols", resp.BaseFeatureResponse, 0, 0, 0)
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&path, "path", "", "file path to list symbols for [required]")
+	cmd.Flags().StringVar(&filter, "filter", "", "case-insensitive substring filter for symbol names")
+	cmd.Flags().StringVar(&format, "format", "", "output format: json (default: brief list)")
 	return cmd
 }
 

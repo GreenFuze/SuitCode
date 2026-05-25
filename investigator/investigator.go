@@ -365,7 +365,24 @@ func (inv *ProjectInvestigator) ExplainFile(ctx context.Context, req cfeatures.E
 	if err != nil {
 		return nil, fmt.Errorf("explain-file: %w", err)
 	}
-	return invfeatures.RunExplainFile(ctx, req, listing, inv.estimator, inv.multiProvider)
+
+	resp, retErr = invfeatures.RunExplainFile(ctx, req, listing, inv.estimator, inv.multiProvider)
+
+	// Augment with NuGet package references when the C# provider is active.
+	if retErr == nil && resp != nil {
+		if pkgRefs := inv.multiProvider.GetCSPackageRefs(resp.FilePath); len(pkgRefs) > 0 {
+			resp.ExternalDependencies = make([]cfeatures.ExternalDependency, len(pkgRefs))
+			for i, r := range pkgRefs {
+				resp.ExternalDependencies[i] = cfeatures.ExternalDependency{
+					Manager: "NuGet",
+					Name:    r.Name,
+					Version: r.Version,
+				}
+			}
+		}
+	}
+
+	return
 }
 
 func (inv *ProjectInvestigator) Related(ctx context.Context, req cfeatures.RelatedRequest) (resp *cfeatures.RelatedResponse, retErr error) {

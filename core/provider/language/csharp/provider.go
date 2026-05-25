@@ -170,6 +170,18 @@ func (p *CSHarpLanguageProvider) FileImports(_ context.Context, filePath string)
 	}, nil
 }
 
+// GetPackageRefs returns the NuGet <PackageReference> items declared in the
+// .csproj that contains filePath. Returns nil when the provider is not ready
+// or filePath is not part of any tracked C# project.
+func (p *CSHarpLanguageProvider) GetPackageRefs(filePath string) []PackageRef {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if !p.ready {
+		return nil
+	}
+	return p.idx.filePackageRefs[filePath]
+}
+
 // FileImporters returns the absolute paths of files in projects that directly
 // reference filePath's project. Avalonia partner is included when present.
 func (p *CSHarpLanguageProvider) FileImporters(_ context.Context, filePath string) (*provider.ProviderResult[[]string], error) {
