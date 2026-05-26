@@ -33,6 +33,21 @@ SuitCode speaks your toolchain. It doesn't guess — it asks the tools your lang
 
 SuitCode never returns a result it can't back with a verified signal. If the import graph isn't available, it says so — it does **not** fall back silently to a regex scan and pretend that's the same thing. Every result carries its provenance.
 
+---
+
+## Real-world validation
+
+We ran SuitCode on a 2-day, 89-call Claude Code session building a cross-platform desktop app in C#. The session analysis showed:
+
+- **~54% of feature calls directly preceded code edits** (adjusted for expected no-edit calls like warmup and metrics)
+- The **5 highest-signal calls each preceded 1–66 files being created or edited** within 2–5 turns
+- **Context quality was high** — the failure modes were tooling (PowerShell piping, warmup instability), not bad context
+- After agents calibrated to use `--output <file>` and appropriate budgets, the late-session edit rate reached ~4/5
+
+SuitCode includes a built-in session analysis tool that computes these signals automatically from your Claude Code session files — no manual instrumentation needed.
+
+---
+
 ## Quick install
 
 **Requires:** Go 1.21+
@@ -95,6 +110,17 @@ suitcode . context \
 
 Typical compression ratio: **10–40×**. 500-file repo → 15 files in context.
 
+The budget model is tiered:
+
+- **Tier 1 (critical path):** seeds, direct imports, and production importers — always included regardless of budget
+- **Tier 2 (contextual):** package peers and test files — included up to remaining budget, pruned when tight
+
+When Tier 2 is trimmed, SuitCode reports the exact `--budget` value needed to include everything:
+
+```
+contextual_trimmed: 3 peer/test file(s) omitted (1240 tokens) — use --budget 9240 to include all structurally related files
+```
+
 ### For agents working across languages
 
 SuitCode is polyglot from day one. In a repo with a Go backend, TypeScript frontend, and Python scripts, SuitCode runs all three import-graph providers simultaneously and merges the results. No "pick one language" compromise.
@@ -151,6 +177,39 @@ Parses build or test failure output, resolves file paths against the real index,
 
 ---
 
+## Feedback and session analysis
+
+### Per-call feedback
+
+Agents are encouraged to rate every SuitCode call immediately after receiving the response:
+
+```sh
+suitcode . feedback good   # response was useful
+suitcode . feedback bad    # response was insufficient or wrong
+```
+
+Ratings are stored in `.suitcode/calllog.jsonl`. The `metrics` command summarises them:
+
+```
+feedback: 23 call(s) rated (18 good, 5 bad) — 78% helpful
+```
+
+This gives you a factual, per-project quality signal rather than an impression.
+
+### Session analysis (tray)
+
+The desktop tray companion adds three session-intelligence items to each project's sub-menu:
+
+- **Analyze Last Session** — parses your most recent Claude Code session file, extracts every `suitcode` invocation, computes heuristic signals (edit-tool used after, turns until next edit, retry patterns), and saves a structured JSON pack to `.suitcode/analysis-<timestamp>.json`. The menu item updates to show call count and session time for 60 seconds after completion.
+
+- **Copy Analysis Pack** — copies the full analysis pack JSON to the clipboard (after a privacy notice, since it contains conversation excerpts). Paste into any LLM chat to get an independent quality review.
+
+- **Copy Pack Path** — copies just the file path to the clipboard, with no privacy prompt. For local agents (Claude Code, Cursor) that can read the file directly — avoids dumping megabytes of JSON into the conversation context.
+
+The analysis pack contains embedded `instructions_for_llm` that guide the reviewing model to score each call 1–5, identify recurring failure patterns, and estimate the overall helpful rate.
+
+---
+
 ## For Codex / Claude Code integration
 
 SuitCode exposes all features as an HTTP API. The coordinator runs on `127.0.0.1:7878` by default.
@@ -184,11 +243,13 @@ SuitCode writes progress lines to **stderr** and JSON to **stdout**. In bash/zsh
 suitcode . context --files src/app.ts --format json 2>/dev/null | jq .
 ```
 
-In PowerShell, piping JSON output may fail with "pipe being closed". Use `--output` instead:
+In PowerShell, piping JSON output may fail with "pipe being closed" for large responses. SuitCode will warn you when this is detected:
 
-```powershell
-suitcode . context --files src/app.ts --format json --output result.json
-$r = Get-Content result.json | ConvertFrom-Json
+```
+warn: stdout is a pipe — PowerShell may truncate large JSON responses.
+  Use --output <file> to avoid this:
+    suitcode . context --files foo.go --format json --output result.json
+    $r = Get-Content result.json | ConvertFrom-Json
 ```
 
 The `--output` flag is available on every feature command.
@@ -202,6 +263,7 @@ The `--output` flag is available on every feature command.
 | Go | `go/packages` (full, multi-module) | `gopls` | ✓ |
 | TypeScript / JavaScript | Static AST + tsconfig path aliases | — | ✓ |
 | Python | Static AST + relative import resolution | — | ✓ |
+| C# | — | — | ✓ (directory and filename conventions) |
 
 More languages are on the roadmap. SuitCode's provider model makes it straightforward to add new language backends without changing the core.
 
@@ -211,10 +273,12 @@ More languages are on the roadmap. SuitCode's provider model makes it straightfo
 
 ```
 suitcode/           — CLI client (auto-starts coordinator on first use)
-coordinator/        — HTTP daemon routing requests to per-project investigators
+coordinator/        — HTTP daemon + desktop tray icon (-tags systray)
+  tray_systray.go   — system tray with per-project sub-menus and session analysis
 investigator/       — per-project daemon: file index, import graph, gopls, features
   features/         — context capsule, explain-file, related, tests, impact, …
-tray/               — desktop status companion (build with -tags systray)
+sessionanalysis/    — Claude Code session parser: extracts suitcode calls, computes quality signals
+calllog/            — per-call metric log with feedback ratings and aggregate summaries
 core/
   provider/
     language/go/    — Go import graph via go/packages + gopls LSP
@@ -235,7 +299,15 @@ go test ./...                  # full suite including eval correctness checks
 go build ./suitcode            # CLI
 go build ./coordinator         # coordinator daemon
 go build ./investigator        # investigator daemon
-go build -tags systray ./tray  # desktop tray (requires CGo)
+go build -tags systray ./coordinator  # coordinator with desktop tray (requires CGo)
+```
+
+For development builds with correct flags per-platform:
+
+```sh
+./dev-install.sh             # build + install all three binaries
+./dev-install.sh --restart   # also kill any running coordinator and restart it
+./dev-install.sh --ci        # CGo-free, no tray (headless / CI servers)
 ```
 
 State is written to `.suitcode/` in each analyzed repo. Add it to `.gitignore`:
