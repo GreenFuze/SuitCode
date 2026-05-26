@@ -30,6 +30,8 @@ var languageByExt = map[string]string{
 	".rs":     "Rust",
 	".java":   "Java",
 	".cs":     "C#",
+	".axaml":  "C#",
+	".xaml":   "C#",
 	".cpp":    "C++",
 	".cc":     "C++",
 	".cxx":    "C++",

@@ -123,7 +123,9 @@ func (d *LanguageDispatcher) providerFor(filePath string) provider.ImportGraphPr
 		if d.pyProvider != nil {
 			return d.pyProvider
 		}
-	case ext == ".cs":
+	case ext == ".cs" || ext == ".axaml" || ext == ".xaml":
+		// .axaml and .xaml are Avalonia/WPF markup files whose import graph
+		// (partner detection) is owned by the C# provider.
 		if d.csProvider != nil {
 			return d.csProvider
 		}

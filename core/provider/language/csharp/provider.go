@@ -409,7 +409,8 @@ func (p *CSHarpLanguageProvider) importedFilesFor(filePath string) []string {
 	result := make([]string, 0, len(p.idx.fileImports[filePath])+1)
 	result = append(result, p.idx.fileImports[filePath]...)
 
-	// Include the Avalonia code-behind partner (.axaml ↔ .axaml.cs) as a peer.
+	// Include the Avalonia code-behind partner (.axaml ↔ .axaml.cs) as an import
+	// (Tier 1) so the pair is never separated by budget trimming.
 	if partner, ok := p.idx.partners[filePath]; ok {
 		result = append(result, partner)
 	}
