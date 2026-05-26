@@ -6,14 +6,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/GreenFuze/SuitCode/core/lsp"
 )
 
 // goplsClient is a high-level client for a running gopls subprocess.
-// It wraps an lspTransport and provides Initialize, Shutdown, and
+// It wraps an lsp.Transport and provides Initialize, Shutdown, and
 // DocumentSymbols operations. All methods are safe for concurrent use
 // after Initialize() returns successfully.
 type goplsClient struct {
-	transport *lspTransport
+	transport *lsp.Transport
 	rootPath  string // absolute filesystem path of the workspace root
 	rootURI   string // file:// URI of the workspace root
 }
@@ -23,9 +25,9 @@ type goplsClient struct {
 // the LSP handshake.
 func newGoplsClient(binaryPath, rootPath string) *goplsClient {
 	return &goplsClient{
-		transport: newLspTransport(binaryPath),
+		transport: lsp.NewTransport(binaryPath),
 		rootPath:  rootPath,
-		rootURI:   pathToURI(rootPath),
+		rootURI:   lsp.PathToURI(rootPath),
 	}
 }
 
@@ -42,17 +44,17 @@ func (c *goplsClient) Initialize(ctx context.Context) error {
 		return fmt.Errorf("gopls: start process: %w", err)
 	}
 
-	params := lspInitializeParams{
+	params := lsp.InitializeParams{
 		ProcessID: nil, // null — gopls does not need our PID
 		RootURI:   c.rootURI,
-		Capabilities: lspClientCapabilities{
-			TextDocument: lspTextDocumentCapabilities{
-				DocumentSymbol: lspDocumentSymbolCapabilities{
+		Capabilities: lsp.ClientCapabilities{
+			TextDocument: lsp.TextDocumentCapabilities{
+				DocumentSymbol: lsp.DocumentSymbolCapabilities{
 					HierarchicalDocumentSymbolSupport: true,
 				},
 			},
 		},
-		WorkspaceFolders: []lspWorkspaceFolder{
+		WorkspaceFolders: []lsp.WorkspaceFolder{
 			{URI: c.rootURI, Name: filepath.Base(c.rootPath)},
 		},
 	}
@@ -92,14 +94,14 @@ func (c *goplsClient) Shutdown(ctx context.Context) error {
 //  3. textDocument/didClose  (deferred — runs even on error)
 //
 // Returns nil slice (no error) when the file has no symbols.
-func (c *goplsClient) DocumentSymbols(ctx context.Context, absPath string) ([]lspDocumentSymbol, error) {
+func (c *goplsClient) DocumentSymbols(ctx context.Context, absPath string) ([]lsp.DocumentSymbol, error) {
 	// Read file content — gopls needs the full text in didOpen.
 	content, err := os.ReadFile(absPath)
 	if err != nil {
 		return nil, fmt.Errorf("gopls: reading %s: %w", absPath, err)
 	}
 
-	uri := pathToURI(absPath)
+	uri := lsp.PathToURI(absPath)
 
 	// Open the document — gopls requires this before answering symbol queries.
 	didOpenParams := map[string]any{
@@ -135,7 +137,7 @@ func (c *goplsClient) DocumentSymbols(ctx context.Context, absPath string) ([]ls
 		return nil, nil
 	}
 
-	var symbols []lspDocumentSymbol
+	var symbols []lsp.DocumentSymbol
 	if err := json.Unmarshal(raw, &symbols); err != nil {
 		return nil, fmt.Errorf("gopls: unmarshalling symbols for %s: %w", absPath, err)
 	}

@@ -6,6 +6,7 @@ package goprovider
 import (
 	"context"
 
+	"github.com/GreenFuze/SuitCode/core/lsp"
 	"github.com/GreenFuze/SuitCode/core/provider"
 )
 
@@ -86,19 +87,19 @@ func NewGoplsClientForTest(binaryPath, rootPath string) *goplsClient {
 	return newGoplsClient(binaryPath, rootPath)
 }
 
-// PathToURIForTest exposes the internal pathToURI helper.
+// PathToURIForTest exposes the PathToURI helper from the shared lsp package.
 func PathToURIForTest(absPath string) string {
-	return pathToURI(absPath)
+	return lsp.PathToURI(absPath)
 }
 
 // FlattenSymbolNamesForTest exposes the internal symbol-flattening helper.
-func FlattenSymbolNamesForTest(syms []lspDocumentSymbol) []string {
+func FlattenSymbolNamesForTest(syms []lsp.DocumentSymbol) []string {
 	return flattenSymbolNames(syms)
 }
 
-// LspDocumentSymbolForTest is an alias for lspDocumentSymbol so tests can
-// construct symbol trees without using internal types directly.
-type LspDocumentSymbolForTest = lspDocumentSymbol
+// LspDocumentSymbolForTest is an alias for lsp.DocumentSymbol so tests can
+// construct symbol trees without importing the lsp package directly.
+type LspDocumentSymbolForTest = lsp.DocumentSymbol
 
 // ManagedGoplsBinDirForTest exposes managedGoplsBinDir for unit tests.
 func ManagedGoplsBinDirForTest() string {

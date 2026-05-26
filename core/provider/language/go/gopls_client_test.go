@@ -221,7 +221,7 @@ func TestGoplsClient_DocumentSymbols_MultipleFiles(t *testing.T) {
 	// Query symbols from two different files in the same workspace.
 	files := []string{
 		filepath.Join(root, "core", "provider", "language", "go", "provider.go"),
-		filepath.Join(root, "core", "provider", "language", "go", "lsp_types.go"),
+		filepath.Join(root, "core", "lsp", "types.go"),
 	}
 
 	for _, f := range files {
@@ -261,7 +261,7 @@ func TestGoplsClient_LspTypes_KnownFile(t *testing.T) {
 		_ = client.Shutdown(shutCtx)
 	}()
 
-	lspTypesFile := filepath.Join(root, "core", "provider", "language", "go", "lsp_types.go")
+	lspTypesFile := filepath.Join(root, "core", "lsp", "types.go")
 	if _, err := os.Stat(lspTypesFile); err != nil {
 		t.Fatalf("test fixture not found: %s", lspTypesFile)
 	}
@@ -277,8 +277,8 @@ func TestGoplsClient_LspTypes_KnownFile(t *testing.T) {
 		nameSet[n] = true
 	}
 
-	// lsp_types.go defines pathToURI (function) and several types.
-	expected := []string{"pathToURI", "lspDocumentSymbol"}
+	// core/lsp/types.go defines exported types such as DocumentSymbol, Position.
+	expected := []string{"DocumentSymbol", "Position"}
 	for _, want := range expected {
 		if !nameSet[want] {
 			t.Logf("symbol %q not found in %v (may depend on gopls version)", want, names)

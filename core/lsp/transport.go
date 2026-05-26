@@ -1,4 +1,10 @@
-package goprovider
+// Package lsp provides a language-agnostic JSON-RPC 2.0 transport and shared
+// protocol types for Language Server Protocol clients.
+//
+// The Transport type manages a subprocess's stdin/stdout using Content-Length
+// framing as specified by the LSP base protocol. Multiple language providers
+// (Go, C#, etc.) share this single implementation.
+package lsp
 
 import (
 	"bufio"
@@ -6,7 +12,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,19 +23,20 @@ import (
 	"time"
 )
 
-// lspResponse is the result dispatched to a caller waiting for a JSON-RPC2 response.
-type lspResponse struct {
+// Response is the result dispatched to a caller waiting for a JSON-RPC 2.0
+// response from the LSP subprocess.
+type Response struct {
 	Result json.RawMessage
 	Err    error
 }
 
-// lspTransport implements Content-Length framed JSON-RPC 2.0 over a subprocess's
+// Transport implements Content-Length framed JSON-RPC 2.0 over a subprocess's
 // stdin/stdout pipes. It is safe for concurrent use after Start() returns.
 //
 // Lifecycle:
 //
-//	newLspTransport(binary) → Start() → SendRequest / SendNotify (concurrent) → Stop()
-type lspTransport struct {
+//	NewTransport(binary, args...) → Start() → SendRequest / SendNotify (concurrent) → Stop()
+type Transport struct {
 	cmd    *exec.Cmd
 	stdin  *bufio.Writer // wraps cmd's StdinPipe
 	stdout *bufio.Reader // wraps cmd's StdoutPipe
@@ -39,7 +49,7 @@ type lspTransport struct {
 
 	// pendingMu guards the pending map. Never acquired while mu is held.
 	pendingMu sync.Mutex
-	pending   map[int]chan lspResponse
+	pending   map[int]chan Response
 
 	// crashed is set by readerLoop when stdout returns an error or EOF.
 	crashed atomic.Bool
@@ -53,21 +63,21 @@ type lspTransport struct {
 	done chan struct{}
 }
 
-// newLspTransport creates a transport for the given binary path.
-// The subprocess is NOT started until Start() is called.
-func newLspTransport(binaryPath string) *lspTransport {
-	cmd := exec.Command(binaryPath)
-	cmd.Stderr = nil // suppress gopls diagnostics/log output
-	return &lspTransport{
+// NewTransport creates a Transport for the given binary path and optional extra
+// arguments. The subprocess is NOT started until Start() is called.
+func NewTransport(binaryPath string, args ...string) *Transport {
+	cmd := exec.Command(binaryPath, args...)
+	cmd.Stderr = nil // suppress diagnostic/log output from the language server
+	return &Transport{
 		cmd:     cmd,
-		pending: make(map[int]chan lspResponse),
+		pending: make(map[int]chan Response),
 		done:    make(chan struct{}),
 	}
 }
 
 // Start launches the subprocess and begins the background reader goroutine.
 // Must be called exactly once before any SendRequest or SendNotify calls.
-func (t *lspTransport) Start() error {
+func (t *Transport) Start() error {
 	stdinPipe, err := t.cmd.StdinPipe()
 	if err != nil {
 		return fmt.Errorf("lsp transport: StdinPipe: %w", err)
@@ -93,7 +103,7 @@ func (t *lspTransport) Start() error {
 // SendRequest writes a JSON-RPC 2.0 request and blocks until the matching
 // response arrives or ctx is cancelled. Returns an error if the transport
 // is in crashed or closed state.
-func (t *lspTransport) SendRequest(ctx context.Context, method string, params any) (json.RawMessage, error) {
+func (t *Transport) SendRequest(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	if t.closed.Load() {
 		return nil, fmt.Errorf("lsp transport: closed")
 	}
@@ -102,7 +112,7 @@ func (t *lspTransport) SendRequest(ctx context.Context, method string, params an
 	}
 
 	// Buffered channel so the reader goroutine never blocks on dispatch.
-	ch := make(chan lspResponse, 1)
+	ch := make(chan Response, 1)
 
 	// Hold mu for the entire id-alloc + channel-register + write sequence.
 	// This ensures the response channel is registered BEFORE the request
@@ -145,7 +155,7 @@ func (t *lspTransport) SendRequest(ctx context.Context, method string, params an
 }
 
 // SendNotify writes a JSON-RPC 2.0 notification (no ID, no response).
-func (t *lspTransport) SendNotify(method string, params any) error {
+func (t *Transport) SendNotify(method string, params any) error {
 	if t.closed.Load() {
 		return fmt.Errorf("lsp transport: closed")
 	}
@@ -165,7 +175,7 @@ func (t *lspTransport) SendNotify(method string, params any) error {
 // subprocess, and waits for the reader goroutine to exit.
 // Safe to call multiple times — subsequent calls block until the first
 // completes, then return immediately.
-func (t *lspTransport) Stop() {
+func (t *Transport) Stop() {
 	if !t.closed.CompareAndSwap(false, true) {
 		// Already stopped (or being stopped) — wait for reader to finish.
 		if t.started.Load() {
@@ -177,7 +187,7 @@ func (t *lspTransport) Stop() {
 	// Drain all in-flight pending channels.
 	t.pendingMu.Lock()
 	for id, ch := range t.pending {
-		ch <- lspResponse{Err: fmt.Errorf("lsp transport: stopped")}
+		ch <- Response{Err: fmt.Errorf("lsp transport: stopped")}
 		delete(t.pending, id)
 	}
 	t.pendingMu.Unlock()
@@ -209,7 +219,7 @@ func (t *lspTransport) Stop() {
 
 // writeMessageLocked serialises payload as JSON and writes a Content-Length
 // framed message to stdin. Caller must hold t.mu.
-func (t *lspTransport) writeMessageLocked(payload any) error {
+func (t *Transport) writeMessageLocked(payload any) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
@@ -233,7 +243,7 @@ func (t *lspTransport) writeMessageLocked(payload any) error {
 //
 // Exits when stdout returns an error (including EOF after process death).
 // Sets crashed=true and drains all pending channels before returning.
-func (t *lspTransport) readerLoop() {
+func (t *Transport) readerLoop() {
 	defer close(t.done)
 
 	for {
@@ -245,7 +255,7 @@ func (t *lspTransport) readerLoop() {
 			}
 			t.pendingMu.Lock()
 			for id, ch := range t.pending {
-				ch <- lspResponse{Err: fmt.Errorf("lsp transport: reader: %w", err)}
+				ch <- Response{Err: fmt.Errorf("lsp transport: reader: %w", err)}
 				delete(t.pending, id)
 			}
 			t.pendingMu.Unlock()
@@ -269,7 +279,7 @@ func (t *lspTransport) readerLoop() {
 		}
 
 		// Build response.
-		var resp lspResponse
+		var resp Response
 		if errRaw, hasErr := msg["error"]; hasErr && string(errRaw) != "null" {
 			var lspErr struct {
 				Code    int    `json:"code"`
@@ -296,7 +306,7 @@ func (t *lspTransport) readerLoop() {
 
 // readMessage reads one Content-Length framed JSON message from stdout.
 // Returns (nil, io.EOF) when the stream ends cleanly.
-func (t *lspTransport) readMessage() (map[string]json.RawMessage, error) {
+func (t *Transport) readMessage() (map[string]json.RawMessage, error) {
 	var contentLength int
 
 	// Read HTTP-style headers until a blank line.
@@ -340,4 +350,28 @@ func (t *lspTransport) readMessage() (map[string]json.RawMessage, error) {
 		return nil, fmt.Errorf("unmarshalling message: %w", err)
 	}
 	return msg, nil
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// File-URI helpers
+// ──────────────────────────────────────────────────────────────────────────────
+
+// PathToURI converts an absolute filesystem path to an LSP file:// URI.
+//
+//   - POSIX: /foo/bar.go  →  file:///foo/bar.go
+//   - Windows: C:\foo\bar.go  →  file:///C:/foo/bar.go
+//
+// The implementation uses net/url so special characters (spaces, etc.) are
+// percent-encoded correctly.
+func PathToURI(absPath string) string {
+	p := filepath.ToSlash(absPath)
+
+	// Windows drive letter: "C:/foo" needs a leading "/" to give "/C:/foo"
+	// so that url.URL produces three slashes (file:// + /C:/...).
+	if runtime.GOOS == "windows" && len(p) >= 2 && p[1] == ':' {
+		p = "/" + p
+	}
+
+	u := &url.URL{Scheme: "file", Path: p}
+	return u.String()
 }

@@ -12,9 +12,11 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -215,6 +217,26 @@ func main() {
 	if len(os.Args) < 2 || isHelpArg(os.Args[1]) {
 		fmt.Print(usage)
 		os.Exit(0)
+	}
+
+	// installdeps is a global command that does not require a repo path.
+	// Handle it before the path parsing so it is always accessible.
+	if os.Args[1] == "installdeps" {
+		// Splice "installdeps" out and run it as a standalone cobra command.
+		os.Args = append(os.Args[:1], os.Args[2:]...)
+		root := &cobra.Command{
+			Use:           "suitcode",
+			SilenceUsage:  true,
+			SilenceErrors: true,
+		}
+		root.AddCommand(newInstallDepsCmd())
+		// Re-insert "installdeps" so cobra can find the subcommand.
+		os.Args = append([]string{os.Args[0], "installdeps"}, os.Args[1:]...)
+		if err := root.Execute(); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	// Fail fast if the first arg looks like a flag rather than a path.
@@ -1401,4 +1423,145 @@ func splitComma(s string) []string {
 		}
 	}
 	return out
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// installdeps — global command, no repo-path required
+// ──────────────────────────────────────────────────────────────────────────────
+
+// depTool describes a single LSP server or language tool that SuitCode can use.
+type depTool struct {
+	name        string   // display name
+	checkCmd    string   // command to check if installed (first word = binary)
+	checkArgs   []string // args to pass to checkCmd
+	installCmd  string   // package manager binary for install
+	installArgs []string // args to pass to installCmd
+	pmName      string   // human-readable name of the package manager (for error messages)
+}
+
+// lspTools is the list of LSP servers checked by installdeps.
+var lspTools = []depTool{
+	{
+		name:        "gopls",
+		checkCmd:    "gopls",
+		checkArgs:   []string{"version"},
+		installCmd:  "go",
+		installArgs: []string{"install", "golang.org/x/tools/gopls@latest"},
+		pmName:      "go",
+	},
+	{
+		name:        "csharp-ls",
+		checkCmd:    "csharp-ls",
+		checkArgs:   []string{"--version"},
+		installCmd:  "dotnet",
+		installArgs: []string{"tool", "install", "--global", "csharp-ls"},
+		pmName:      "dotnet",
+	},
+	{
+		name:        "typescript-language-server",
+		checkCmd:    "typescript-language-server",
+		checkArgs:   []string{"--version"},
+		installCmd:  "npm",
+		installArgs: []string{"install", "-g", "typescript-language-server", "typescript"},
+		pmName:      "npm",
+	},
+	{
+		name:        "pylsp",
+		checkCmd:    "pylsp",
+		checkArgs:   []string{"--version"},
+		installCmd:  "pip",
+		installArgs: []string{"install", "python-lsp-server"},
+		pmName:      "pip",
+	},
+}
+
+func newInstallDepsCmd() *cobra.Command {
+	var yes bool
+
+	cmd := &cobra.Command{
+		Use:   "installdeps",
+		Short: "Install required LSP servers and language tools",
+		Long: `Detects which LSP servers are needed and installs any that are missing.
+Required tools: gopls (Go), csharp-ls (C#), typescript-language-server (TS/JS), pylsp (Python).`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runInstallDeps(yes)
+		},
+	}
+
+	cmd.Flags().BoolVar(&yes, "yes", false, "install all missing deps without prompting")
+	return cmd
+}
+
+// runInstallDeps checks for each LSP tool and installs missing ones.
+func runInstallDeps(yes bool) error {
+	fmt.Println("SuitCode dependency check")
+	fmt.Println("─────────────────────────")
+
+	stdin := bufio.NewReader(os.Stdin)
+	installed := 0
+	skipped := 0
+	failed := 0
+
+	for _, tool := range lspTools {
+		// Check whether the tool is already installed.
+		checkCmd := exec.Command(tool.checkCmd, tool.checkArgs...) //nolint:gosec
+		if err := checkCmd.Run(); err == nil {
+			fmt.Printf("  ✓ %-40s already installed\n", tool.name)
+			installed++
+			continue
+		}
+
+		// Tool not found.
+		fmt.Printf("  ✗ %-40s not found\n", tool.name)
+
+		// Verify the package manager is available before offering to install.
+		if _, pmErr := exec.LookPath(tool.installCmd); pmErr != nil {
+			fmt.Printf("    (skipping: %s not in PATH — install %s manually)\n", tool.pmName, tool.name)
+			skipped++
+			continue
+		}
+
+		// Decide whether to install.
+		doInstall := yes
+		if !doInstall {
+			installCmdStr := tool.installCmd + " " + strings.Join(tool.installArgs, " ")
+			fmt.Printf("    Install with: %s\n", installCmdStr)
+			fmt.Printf("    Install now? [y/N] ")
+			line, _ := stdin.ReadString('\n')
+			line = strings.TrimSpace(strings.ToLower(line))
+			doInstall = (line == "y" || line == "yes")
+		}
+
+		if !doInstall {
+			fmt.Printf("    skipped\n")
+			skipped++
+			continue
+		}
+
+		// Run the installation command, streaming output to stdout.
+		fmt.Printf("    Installing %s...\n", tool.name)
+		installCmd := exec.Command(tool.installCmd, tool.installArgs...) //nolint:gosec
+		installCmd.Stdout = os.Stdout
+		installCmd.Stderr = os.Stderr
+		if err := installCmd.Run(); err != nil {
+			fmt.Printf("    ERROR: installation failed: %v\n", err)
+			failed++
+		} else {
+			fmt.Printf("    ✓ %s installed successfully\n", tool.name)
+			installed++
+		}
+	}
+
+	// Print summary.
+	fmt.Println("─────────────────────────")
+	if runtime.GOOS == "windows" {
+		fmt.Printf("Summary: %d installed · %d skipped · %d failed\n", installed, skipped, failed)
+	} else {
+		fmt.Printf("Summary: %d installed · %d skipped · %d failed\n", installed, skipped, failed)
+	}
+
+	if failed > 0 {
+		return fmt.Errorf("%d tool(s) failed to install", failed)
+	}
+	return nil
 }

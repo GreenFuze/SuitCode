@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/GreenFuze/SuitCode/core/lsp"
 	"github.com/GreenFuze/SuitCode/core/provider"
 )
 
@@ -483,11 +484,11 @@ func (p *GoLanguageProvider) accumulatedGoplsLimitations() []provider.Limitation
 // flattenSymbolNames recursively collects symbol names from a hierarchical
 // document symbol tree. Top-level symbols produce "Name"; nested symbols
 // (methods, fields) produce "Parent.Name".
-func flattenSymbolNames(symbols []lspDocumentSymbol) []string {
+func flattenSymbolNames(symbols []lsp.DocumentSymbol) []string {
 	return flattenSymbolNamesWithPrefix(symbols, "")
 }
 
-func flattenSymbolNamesWithPrefix(symbols []lspDocumentSymbol, prefix string) []string {
+func flattenSymbolNamesWithPrefix(symbols []lsp.DocumentSymbol, prefix string) []string {
 	var names []string
 	for _, sym := range symbols {
 		name := sym.Name
