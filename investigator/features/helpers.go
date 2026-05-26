@@ -190,69 +190,6 @@ func fileToRef(f provider.FilesystemFile, prov provider.Provenance) provider.Fil
 	}
 }
 
-// filesInSameDir returns all files in the same directory as relPath.
-func filesInSameDir(listing *provider.ProviderResult[provider.FilesystemListing], relPath string) []provider.FilesystemFile {
-	dir := filepath.ToSlash(filepath.Dir(relPath))
-	if dir == "." {
-		dir = ""
-	}
-
-	var out []provider.FilesystemFile
-	for _, f := range listing.Data.Files {
-		if f.RelPath == relPath {
-			continue // exclude the file itself
-		}
-		fd := filepath.ToSlash(filepath.Dir(f.RelPath))
-		if fd == "." {
-			fd = ""
-		}
-		if fd == dir {
-			out = append(out, f)
-		}
-	}
-	return out
-}
-
-// testFilesForSource returns test files that correspond to the given source
-// file using naming conventions.
-func testFilesForSource(listing *provider.ProviderResult[provider.FilesystemListing], relPath string) []provider.FilesystemFile {
-	base := filepath.Base(relPath)
-	ext := filepath.Ext(base)
-	stem := strings.TrimSuffix(base, ext)
-	dir := filepath.ToSlash(filepath.Dir(relPath))
-
-	// Patterns: stem_test.go, test_stem.go, stem.test.ts, stem.spec.ts, etc.
-	testPatterns := []string{
-		stem + "_test" + ext,                         // Go convention
-		"test_" + stem + ext,                         // Python convention
-		stem + ".test" + ext,                         // JS/TS convention
-		stem + ".spec" + ext,                         // JS/TS convention
-		stem + ".test" + strings.TrimSuffix(ext, filepath.Ext(ext)), // for .ts -> .test.ts
-	}
-
-	var out []provider.FilesystemFile
-	for _, f := range listing.Data.Files {
-		if f.Role != "test" {
-			continue
-		}
-		fBase := filepath.Base(f.RelPath)
-		fDir := filepath.ToSlash(filepath.Dir(f.RelPath))
-
-		// Same directory or subdirectory.
-		if !strings.HasPrefix(fDir, dir) && fDir != dir {
-			continue
-		}
-
-		for _, pat := range testPatterns {
-			if strings.EqualFold(fBase, pat) {
-				out = append(out, f)
-				break
-			}
-		}
-	}
-	return out
-}
-
 // isTestFile reports whether a file path matches common test naming patterns.
 func isTestFile(relPath string) bool {
 	base := strings.ToLower(filepath.Base(relPath))

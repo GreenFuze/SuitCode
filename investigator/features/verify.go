@@ -13,13 +13,16 @@ import (
 const defaultVerifyBudget = 4_000
 
 // RunVerifyPlan generates a deterministic verification plan for a set of
-// changed files, using detected build systems and naming conventions.
+// changed files, using detected build systems.
+// langProv may be nil; when provided, test files are discovered via FileTests
+// rather than naming conventions.
 func RunVerifyPlan(
-	_ context.Context,
+	ctx context.Context,
 	req cfeatures.VerifyPlanRequest,
 	listing *provider.ProviderResult[provider.FilesystemListing],
 	vcsResult *provider.ProviderResult[provider.VCSDiff],
 	estimator provider.TokenEstimator,
+	langProv provider.ImportGraphProvider,
 ) (*cfeatures.VerifyPlanResponse, error) {
 	if len(req.FilePaths) == 0 && req.GitRef == "" {
 		return nil, fmt.Errorf("verify-plan: --files or --from is required")
@@ -39,9 +42,16 @@ func RunVerifyPlan(
 		changedRelPaths = vcsResult.Data.ChangedFiles
 	}
 
-	// Collect affected packages and test commands.
+	// Build a path→file index for O(1) lookups when resolving abs paths.
+	listingByPath := make(map[string]provider.FilesystemFile, len(listing.Data.Files))
+	for _, f := range listing.Data.Files {
+		listingByPath[f.Path] = f
+	}
+
+	// Collect affected packages and structural test files.
 	affectedPkgs := make(map[string]bool)
-	var relatedTests []provider.FilesystemFile
+	seenTests := make(map[string]bool)
+	var relatedTestRefs []cfeatures.TestReference
 
 	for _, relPath := range changedRelPaths {
 		dir := filepath.ToSlash(filepath.Dir(relPath))
@@ -52,13 +62,44 @@ func RunVerifyPlan(
 			affectedPkgs[dir] = true
 		}
 
-		// Find tests for each changed file.
+		// Find structural test files for each changed file via language provider.
+		if langProv == nil {
+			continue
+		}
 		fsFile, err := findFile(listing, relPath, req.RepoPath)
 		if err != nil {
 			continue
 		}
-		testFiles := testFilesForSource(listing, fsFile.RelPath)
-		relatedTests = append(relatedTests, testFiles...)
+
+		// FileTests: spec-backed test files for the changed file's compilation unit.
+		testRes, testErr := langProv.FileTests(ctx, fsFile.Path)
+		if testErr == nil && testRes != nil {
+			resp.Limitations = append(resp.Limitations, testRes.Limitations...)
+			for _, absPath := range testRes.Data {
+				if seenTests[absPath] {
+					continue
+				}
+				tf, ok := listingByPath[absPath]
+				if !ok {
+					continue
+				}
+				seenTests[absPath] = true
+				prov := provider.Provenance{
+					SourceKind:      provider.SourceKindSyntax,
+					SourceTool:      "language-provider",
+					Authority:       provider.AuthorityVerified,
+					EvidenceSummary: fmt.Sprintf("test file for compilation unit containing changed file %s", fsFile.RelPath),
+					EvidencePaths:   []string{absPath},
+				}
+				relatedTestRefs = append(relatedTestRefs, cfeatures.TestReference{
+					Name:       filepath.Base(tf.RelPath),
+					FilePath:   tf.Path,
+					RelPath:    tf.RelPath,
+					RunCommand: buildTestCommand(tf, listing),
+					Provenance: prov,
+				})
+			}
+		}
 	}
 
 	// Build verification commands based on detected build/test systems.
@@ -115,8 +156,12 @@ func RunVerifyPlan(
 					Kind:              "test",
 					Required:          true,
 					EstimatedCostHint: "medium",
-					Provenance: heuristicProv("changed_files",
-						fmt.Sprintf("package %s contains changed files", pkg)),
+					Provenance: provider.Provenance{
+						SourceKind:      provider.SourceKindGit,
+						SourceTool:      "git",
+						Authority:       provider.AuthorityVerified,
+						EvidenceSummary: fmt.Sprintf("package %s contains changed files (from diff)", pkg),
+					},
 				})
 			}
 		} else {
@@ -228,18 +273,8 @@ func RunVerifyPlan(
 		})
 	}
 
-	// Related tests.
-	for _, tf := range relatedTests {
-		prov := heuristicProv("naming_convention",
-			fmt.Sprintf("test file for changed source: %s", tf.RelPath), tf.Path)
-		resp.RelatedTests = append(resp.RelatedTests, cfeatures.TestReference{
-			Name:       filepath.Base(tf.RelPath),
-			FilePath:   tf.Path,
-			RelPath:    tf.RelPath,
-			RunCommand: buildTestCommand(tf, listing),
-			Provenance: prov,
-		})
-	}
+	// Populate RelatedTests from the structurally discovered test references.
+	resp.RelatedTests = relatedTestRefs
 
 	resp.CommandsConsidered = commandsConsidered
 	resp.CommandsSelected = len(resp.Commands)

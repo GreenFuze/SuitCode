@@ -40,7 +40,7 @@ func absPathsToImportRefs(absPaths []string, listing *provider.ProviderResult[pr
 			Provenance: provider.Provenance{
 				SourceKind:      provider.SourceKindSyntax,
 				SourceTool:      provSource,
-				Authority:       provider.AuthorityHeuristic,
+				Authority:       provider.AuthorityVerified,
 				EvidenceSummary: fmt.Sprintf("import resolved by language provider from %s", f.RelPath),
 				EvidencePaths:   []string{p},
 			},
@@ -100,6 +100,13 @@ func RunExplainFile(
 		FileRole:            fsFile.Role,
 	}
 
+	// Build a path→file index for O(1) lookups when resolving abs paths returned
+	// by the language provider.
+	listingByPath := make(map[string]provider.FilesystemFile, len(listing.Data.Files))
+	for _, f := range listing.Data.Files {
+		listingByPath[f.Path] = f
+	}
+
 	// Estimate file size.
 	fileEst, _ := estimator.EstimateFile(fsFile.Path)
 	resp.FileTokenEstimate = fileEst
@@ -147,30 +154,83 @@ func RunExplainFile(
 		}
 	}
 
-	// Find test files for this source file.
-	testFiles := testFilesForSource(listing, fsFile.RelPath)
-	for _, tf := range testFiles {
-		prov := heuristicProv("naming_convention",
-			fmt.Sprintf("test file matches %s by naming convention", fsFile.RelPath), tf.Path)
-		resp.RelatedTests = append(resp.RelatedTests, cfeatures.TestReference{
-			Name:       filepath.Base(tf.RelPath),
-			FilePath:   tf.Path,
-			RelPath:    tf.RelPath,
-			RunCommand: buildTestCommand(tf, listing),
-			Framework:  detectFramework(listing),
-			Provenance: prov,
-		})
+	// ── Structural test discovery ─────────────────────────────────────────────
+	//
+	// FileTests returns spec-backed test files for the seed's compilation unit.
+	// For Go this is the set of *_test.go files in the package directory
+	// (Go spec §10.3). For other languages it returns empty. No naming heuristics.
+	if langProv != nil {
+		testRes, testErr := langProv.FileTests(ctx, fsFile.Path)
+		if testErr == nil && testRes != nil {
+			resp.Limitations = append(resp.Limitations, testRes.Limitations...)
+			for _, absPath := range testRes.Data {
+				tf, ok := listingByPath[absPath]
+				if !ok {
+					continue
+				}
+				prov := provider.Provenance{
+					SourceKind:      provider.SourceKindSyntax,
+					SourceTool:      "language-provider",
+					Authority:       provider.AuthorityVerified,
+					EvidenceSummary: fmt.Sprintf("test file for compilation unit containing %s (language spec)", fsFile.RelPath),
+					EvidencePaths:   []string{absPath},
+				}
+				resp.RelatedTests = append(resp.RelatedTests, cfeatures.TestReference{
+					Name:       filepath.Base(tf.RelPath),
+					FilePath:   tf.Path,
+					RelPath:    tf.RelPath,
+					RunCommand: buildTestCommand(tf, listing),
+					Framework:  detectFramework(listing),
+					Provenance: prov,
+				})
+			}
+		} else if testErr != nil {
+			resp.Limitations = append(resp.Limitations, provider.Limitation{
+				Kind:    "file_tests_query_failed",
+				Message: fmt.Sprintf("test file query failed for %s: %v", fsFile.RelPath, testErr),
+				Scope:   fsFile.RelPath,
+			})
+		}
 	}
 
-	// Find related files in same directory.
-	sameDir := filesInSameDir(listing, fsFile.RelPath)
-	for _, f := range sameDir {
-		if f.Role == "test" {
-			continue // already covered by RelatedTests
+	// ── Structural peer discovery ─────────────────────────────────────────────
+	//
+	// FilePeers returns other source files in the same compilation unit — the
+	// same Go package (go/packages) or the same C# project (.csproj manifest).
+	// No directory-proximity heuristics.
+	if langProv != nil {
+		peersRes, peersErr := langProv.FilePeers(ctx, fsFile.Path)
+		if peersErr == nil && peersRes != nil {
+			resp.Limitations = append(resp.Limitations, peersRes.Limitations...)
+			for _, absPath := range peersRes.Data {
+				f, ok := listingByPath[absPath]
+				if !ok {
+					continue
+				}
+				if f.Role == "test" {
+					continue // already covered by RelatedTests
+				}
+				resp.RelatedFiles = append(resp.RelatedFiles, provider.FileReference{
+					Path:    f.Path,
+					RelPath: f.RelPath,
+					Language: f.Language,
+					Role:    f.Role,
+					Provenance: provider.Provenance{
+						SourceKind:      provider.SourceKindSyntax,
+						SourceTool:      "language-provider",
+						Authority:       provider.AuthorityVerified,
+						EvidenceSummary: fmt.Sprintf("%s is in the same compilation unit as %s", f.RelPath, fsFile.RelPath),
+						EvidencePaths:   []string{absPath},
+					},
+				})
+			}
+		} else if peersErr != nil {
+			resp.Limitations = append(resp.Limitations, provider.Limitation{
+				Kind:    "file_peers_query_failed",
+				Message: fmt.Sprintf("peer file query failed for %s: %v", fsFile.RelPath, peersErr),
+				Scope:   fsFile.RelPath,
+			})
 		}
-		ref := fileToRef(f, heuristicProv("same_directory",
-			fmt.Sprintf("%s is in the same directory as %s", f.RelPath, fsFile.RelPath), f.Path))
-		resp.RelatedFiles = append(resp.RelatedFiles, ref)
 	}
 
 	// Add risk notes.
@@ -178,7 +238,7 @@ func RunExplainFile(
 
 	// Metrics.
 	scanned := fileEst.Tokens
-	for _, f := range sameDir {
+	for _, f := range resp.RelatedFiles {
 		est, _ := estimator.EstimateFile(f.Path)
 		scanned += est.Tokens
 	}
@@ -191,7 +251,7 @@ func RunExplainFile(
 
 	metrics.Budget.Used = outputTokens
 	computeContextReduction(&metrics, scanned, outputTokens,
-		len(listing.Data.Files), 1+len(sameDir), listing.Data.TotalFiles-1-len(sameDir))
+		len(listing.Data.Files), 1+len(resp.RelatedFiles), listing.Data.TotalFiles-1-len(resp.RelatedFiles))
 
 	finishMetrics(&metrics, start, resp)
 	resp.Metrics = metrics
@@ -421,7 +481,7 @@ func detectFramework(listing *provider.ProviderResult[provider.FilesystemListing
 	return ""
 }
 
-func buildRisks(f *provider.FilesystemFile, listing *provider.ProviderResult[provider.FilesystemListing]) []string {
+func buildRisks(f *provider.FilesystemFile, _ *provider.ProviderResult[provider.FilesystemListing]) []string {
 	var risks []string
 
 	if f.Role == "generated" {
@@ -439,12 +499,6 @@ func buildRisks(f *provider.FilesystemFile, listing *provider.ProviderResult[pro
 	if strings.Contains(base, "handler") || strings.Contains(base, "router") ||
 		strings.Contains(base, "controller") || strings.Contains(base, "api") {
 		risks = append(risks, "API surface file — changes may affect external callers or OpenAPI contracts.")
-	}
-
-	// Check if it has many dependents (rough: many files in the same directory).
-	same := filesInSameDir(listing, f.RelPath)
-	if len(same) > 10 {
-		risks = append(risks, fmt.Sprintf("Busy directory (%d siblings) — verify blast radius with 'impact' command.", len(same)))
 	}
 
 	return risks

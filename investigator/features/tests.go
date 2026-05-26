@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
-	"strings"
 
 	cfeatures "github.com/GreenFuze/SuitCode/core/features"
 	"github.com/GreenFuze/SuitCode/core/provider"
@@ -67,66 +66,105 @@ func RunTests(
 		return nil, fmt.Errorf("tests: %w", err)
 	}
 
-	// Score each test file by proximity to the source file.
+	// ── Structural test discovery ─────────────────────────────────────────────
+	//
+	// Two structural signals, both backed by the language provider:
+	//   FileTests     — spec-backed test files for the seed's compilation unit
+	//                   (Go §10.3: *_test.go in the package directory).
+	//   FileImporters — files that directly import the seed, filtered to those
+	//                   tagged as test files in the filesystem listing.
+	//
+	// When no language provider is available we cannot determine structural test
+	// relationships without heuristics, so we emit a limitation and return empty.
+
+	if langProv == nil {
+		resp.Limitations = append(resp.Limitations, provider.Limitation{
+			Kind:    "no_lang_provider",
+			Message: "no language provider available; structural test discovery requires an import graph",
+			Scope:   req.FilePath,
+		})
+		resp.TestsSelected = 0
+		resp.TestsExcluded = resp.TestsConsidered
+		finishMetrics(&metrics, start, resp)
+		resp.Metrics = metrics
+		return resp, nil
+	}
+
 	type scored struct {
 		file   provider.FilesystemFile
 		score  float64
 		reason string
 	}
 
+	seenTests := make(map[string]bool)
 	var candidates []scored
 
-	targetDir := filepath.ToSlash(filepath.Dir(fsFile.RelPath))
-	targetStem := strings.ToLower(strings.TrimSuffix(filepath.Base(fsFile.RelPath),
-		filepath.Ext(fsFile.RelPath)))
-
-	// Pre-compute the set of test files that directly import the target file via
-	// the import graph (highest-confidence signal).
-	testImporters := make(map[string]bool)
-	if langProv != nil {
-		if res, err := langProv.FileImporters(ctx, fsFile.Path); err == nil {
-			for _, p := range res.Data {
-				testImporters[p] = true
+	// Signal 1: FileTests — compilation-unit test files (highest fidelity).
+	testRes, testErr := langProv.FileTests(ctx, fsFile.Path)
+	if testErr != nil {
+		resp.Limitations = append(resp.Limitations, provider.Limitation{
+			Kind:    "file_tests_query_failed",
+			Message: fmt.Sprintf("FileTests query failed for %s: %v", fsFile.RelPath, testErr),
+			Scope:   fsFile.RelPath,
+		})
+	} else if testRes != nil {
+		resp.Limitations = append(resp.Limitations, testRes.Limitations...)
+		for _, absPath := range testRes.Data {
+			if seenTests[absPath] {
+				continue
 			}
+			// Resolve to filesystem file.
+			var matched *provider.FilesystemFile
+			for i := range allTestFiles {
+				if allTestFiles[i].Path == absPath {
+					matched = &allTestFiles[i]
+					break
+				}
+			}
+			if matched == nil {
+				continue
+			}
+			seenTests[absPath] = true
+			candidates = append(candidates, scored{
+				file:   *matched,
+				score:  0.95,
+				reason: "test file for this file's compilation unit (language spec)",
+			})
 		}
 	}
 
-	for _, tf := range allTestFiles {
-		testDir := filepath.ToSlash(filepath.Dir(tf.RelPath))
-		testBase := strings.ToLower(filepath.Base(tf.RelPath))
-
-		// Strip file extension, then also strip common test suffixes/prefixes so
-		// "game.spec.ts" → "game" and "test_utils.py" → "utils".
-		testStem := strings.TrimSuffix(testBase, filepath.Ext(testBase)) // "game.spec"
-		testStem = strings.TrimSuffix(testStem, ".spec")                 // "game"
-		testStem = strings.TrimSuffix(testStem, ".test")                 // (no-op here)
-		testStem = strings.TrimSuffix(testStem, "_test")                 // Go convention
-		testStem = strings.TrimPrefix(testStem, "test_")                 // Python convention
-
-		var score float64
-		var reason string
-
-		// Import-graph match — test file directly imports the source.
-		if testImporters[tf.Path] {
-			score = 0.97
-			reason = "test file directly imports this source file (import graph)"
-		} else if testStem == targetStem {
-			// Direct name match (e.g. foo_test.go → foo.go, App.spec.tsx → App.tsx).
-			score = 0.95
-			reason = "test file name directly matches source file"
-		} else if testDir == targetDir {
-			score = 0.70
-			reason = "test file is in the same directory as source"
-		} else if strings.HasPrefix(testDir, targetDir) {
-			score = 0.50
-			reason = "test file is in a subdirectory of the source's directory"
-		} else if strings.Contains(testStem, targetStem) || strings.Contains(targetStem, testStem) {
-			score = 0.35
-			reason = fmt.Sprintf("name similarity between %q and %q", testStem, targetStem)
-		}
-
-		if score > 0 {
-			candidates = append(candidates, scored{tf, score, reason})
+	// Signal 2: FileImporters filtered to test files — tests that directly
+	// import the seed file. These are structurally guaranteed to exercise it.
+	impRes, impErr := langProv.FileImporters(ctx, fsFile.Path)
+	if impErr != nil {
+		resp.Limitations = append(resp.Limitations, provider.Limitation{
+			Kind:    "file_importers_query_failed",
+			Message: fmt.Sprintf("FileImporters query failed for %s: %v", fsFile.RelPath, impErr),
+			Scope:   fsFile.RelPath,
+		})
+	} else if impRes != nil {
+		resp.Limitations = append(resp.Limitations, impRes.Limitations...)
+		for _, absPath := range impRes.Data {
+			if seenTests[absPath] {
+				continue
+			}
+			// Resolve to filesystem file and check it is a test file.
+			var matched *provider.FilesystemFile
+			for i := range allTestFiles {
+				if allTestFiles[i].Path == absPath {
+					matched = &allTestFiles[i]
+					break
+				}
+			}
+			if matched == nil {
+				continue // not a test file
+			}
+			seenTests[absPath] = true
+			candidates = append(candidates, scored{
+				file:   *matched,
+				score:  0.97,
+				reason: "test file directly imports this source file (import graph)",
+			})
 		}
 	}
 
@@ -137,13 +175,15 @@ func RunTests(
 	tokenUsed := 0
 	for _, c := range candidates {
 		est, _ := estimator.EstimateFile(c.file.Path)
-		if budget > 0 && tokenUsed+est.Tokens > budget {
-			break
-		}
 		tokenUsed += est.Tokens
 
-		prov := heuristicProv("proximity_scoring",
-			fmt.Sprintf("score %.2f for %s", c.score, c.file.RelPath), c.file.Path)
+		prov := provider.Provenance{
+			SourceKind:      provider.SourceKindSyntax,
+			SourceTool:      "language-provider",
+			Authority:       provider.AuthorityVerified,
+			EvidenceSummary: c.reason,
+			EvidencePaths:   []string{c.file.Path},
+		}
 
 		resp.RelevantTests = append(resp.RelevantTests, cfeatures.RelevantTest{
 			Test: cfeatures.TestReference{

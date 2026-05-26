@@ -460,7 +460,7 @@ func (inv *ProjectInvestigator) Impact(ctx context.Context, req cfeatures.Impact
 		}
 	}
 
-	return invfeatures.RunImpact(ctx, req, listing, vcsResult, inv.estimator)
+	return invfeatures.RunImpact(ctx, req, listing, vcsResult, inv.estimator, inv.langDispatcher)
 }
 
 func (inv *ProjectInvestigator) Context(ctx context.Context, req cfeatures.ContextRequest) (resp *cfeatures.ContextResponse, retErr error) {
@@ -541,7 +541,7 @@ func (inv *ProjectInvestigator) VerifyPlan(ctx context.Context, req cfeatures.Ve
 		}
 	}
 
-	return invfeatures.RunVerifyPlan(ctx, req, listing, vcsResult, inv.estimator)
+	return invfeatures.RunVerifyPlan(ctx, req, listing, vcsResult, inv.estimator, inv.langDispatcher)
 }
 
 // GoplsReady reports whether the gopls subprocess has been started and is ready
