@@ -1,15 +1,23 @@
 package features
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	cfeatures "github.com/GreenFuze/SuitCode/core/features"
 	"github.com/GreenFuze/SuitCode/core/provider"
 )
+
+// ChangedFilesProvider can report which files have changed since a git ref.
+// Implemented by *vcs.Provider; nil is accepted (changed-since is disabled).
+type ChangedFilesProvider interface {
+	ChangedFiles(ctx context.Context, fromRef string) (*provider.ProviderResult[[]string], error)
+}
 
 const defaultContextBudget = 8_000
 
@@ -46,13 +54,16 @@ const tierCriticalMin = scoreImporterOf
 // them, applies tiered budget logic, and returns a bounded ContextCapsule.
 //
 // langProv may be nil — when provided it enriches scoring with import-graph
-// signals; otherwise only seeds are returned.
+// signals and provides symbol extraction for --depth signatures mode.
+// vcsProv may be nil — when provided it enables --changed-since differential
+// depth: changed files receive full content, unchanged files receive signatures.
 func RunContext(
 	ctx context.Context,
 	req cfeatures.ContextRequest,
 	listing *provider.ProviderResult[provider.FilesystemListing],
 	estimator provider.TokenEstimator,
 	langProv provider.ImportGraphProvider,
+	vcsProv ChangedFilesProvider,
 ) (*cfeatures.ContextResponse, error) {
 	if len(req.Files) == 0 && req.DiffRef == "" {
 		return nil, fmt.Errorf("context: --files or --from is required")
@@ -84,6 +95,25 @@ func RunContext(
 
 	if len(seedRelPaths) == 0 {
 		return nil, fmt.Errorf("context: none of the specified files were found in the repository index")
+	}
+
+	// ── Changed-since resolution ──────────────────────────────────────────────
+	//
+	// Build a set of rel-paths that have changed since req.ChangedSince.
+	// Files in this set receive full (or req.Depth) content; all others receive
+	// signatures-only content to save tokens on stable background code.
+	changedRelPaths := make(map[string]bool)
+	if req.ChangedSince != "" && vcsProv != nil {
+		if cfRes, err := vcsProv.ChangedFiles(ctx, req.ChangedSince); err == nil {
+			for _, relPath := range cfRes.Data {
+				changedRelPaths[filepath.ToSlash(relPath)] = true
+			}
+		} else {
+			resp.Limitations = append(resp.Limitations, provider.Limitation{
+				Kind:    "changed_since_failed",
+				Message: fmt.Sprintf("could not resolve changed files since %q: %v — all files treated as changed", req.ChangedSince, err),
+			})
+		}
 	}
 
 	// ── Relations filter ─────────────────────────────────────────────────────
@@ -286,27 +316,55 @@ func RunContext(
 			}
 		}
 
-		// Read file content.
-		content, err := os.ReadFile(c.file.Path)
-		if err != nil {
+		// Determine the effective depth for this file.
+		//
+		// Rules:
+		//   1. If ChangedSince is set and the file is NOT in the changed set →
+		//      force signatures mode regardless of req.Depth (unchanged background code).
+		//   2. If ChangedSince is set and the file IS changed, OR ChangedSince is
+		//      unset → use req.Depth ("full" or "signatures").
+		//   3. Seed files always get full content (score 1.0) — they are the
+		//      explicit focus of the session.
+		effectiveDepth := req.Depth
+		if effectiveDepth == "" {
+			effectiveDepth = "full"
+		}
+		if req.ChangedSince != "" && len(changedRelPaths) > 0 {
+			fileSlash := filepath.ToSlash(c.file.RelPath)
+			if !changedRelPaths[fileSlash] && c.score < 1.0 {
+				// Unchanged non-seed file → signatures to save tokens.
+				effectiveDepth = "signatures"
+			}
+		}
+
+		// Acquire file content using the effective depth.
+		fileContent, contentMode, actualEst, readErr := readFileContent(
+			ctx, c.file.Path, effectiveDepth, c.est, langProv,
+		)
+		if readErr != nil {
 			capsule.Rejections = append(capsule.Rejections, cfeatures.ContextRejection{
 				Candidate: cfeatures.ContextCandidate{
 					File:  fileToRef(c.file, fsProv(c.reason, c.file.Path)),
 					Score: c.score,
 				},
-				Reason: fmt.Sprintf("could not read file: %v", err),
+				Reason: fmt.Sprintf("could not read file: %v", readErr),
 			})
 			continue
 		}
 
 		// Include this candidate.
 		rank++
-		tokenUsed += c.est.Tokens
+		tokenUsed += actualEst.Tokens
 		if c.isTier2 {
-			tier2TokensUsed += c.est.Tokens
+			tier2TokensUsed += actualEst.Tokens
 			contextualIncluded++
 		} else {
 			criticalPathCount++
+		}
+
+		factKind := "file_content"
+		if contentMode == "signatures" {
+			factKind = "file_signatures"
 		}
 
 		prov := fsProv(c.reason, c.file.Path)
@@ -315,17 +373,17 @@ func RunContext(
 				File:          fileToRef(c.file, prov),
 				Score:         c.score,
 				ScoreReasons:  []string{c.reason},
-				TokenEstimate: c.est,
+				TokenEstimate: actualEst,
 			},
 			Rank:   rank,
 			Reason: c.reason,
 		})
 		capsule.Facts = append(capsule.Facts, cfeatures.ContextFact{
-			Kind:          "file_content",
-			Content:       string(content),
+			Kind:          factKind,
+			Content:       fileContent,
 			Source:        fileToRef(c.file, prov),
 			Provenance:    prov,
-			TokenEstimate: c.est,
+			TokenEstimate: actualEst,
 		})
 	}
 
@@ -395,6 +453,10 @@ func RunContext(
 	// Flat Files[] for agents.
 	for i, fact := range capsule.Facts {
 		sel := capsule.Selections[i]
+		contentMode := ""
+		if fact.Kind == "file_signatures" {
+			contentMode = "signatures"
+		}
 		resp.Files = append(resp.Files, cfeatures.ContextFileEntry{
 			Path:          fact.Source.Path,
 			RelPath:       fact.Source.RelPath,
@@ -405,6 +467,7 @@ func RunContext(
 			Score:         sel.Candidate.Score,
 			Reason:        sel.Reason,
 			Content:       fact.Content,
+			ContentMode:   contentMode,
 		})
 	}
 
@@ -438,4 +501,121 @@ func RunContext(
 
 func roundTo2(f float64) float64 {
 	return float64(int(f*100)) / 100
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Content reading helpers
+// ──────────────────────────────────────────────────────────────────────────────
+
+// readFileContent reads file content according to the effective depth mode.
+//
+// depth "full"       → read complete file, return ("full", original estimate)
+// depth "signatures" → ask langProv for symbols; format as compact outline.
+//                      Falls back to the first 60 lines when no symbols are
+//                      available (langProv nil, unsupported language, LSP not ready).
+//
+// Returns: text content, content mode ("full" or "signatures"), actual token
+// estimate for the returned content, and any read error.
+func readFileContent(
+	ctx context.Context,
+	absPath string,
+	depth string,
+	originalEst provider.TokenEstimate,
+	langProv provider.ImportGraphProvider,
+) (content string, contentMode string, actualEst provider.TokenEstimate, err error) {
+	if depth != "signatures" {
+		// Full mode: read the entire file.
+		raw, readErr := os.ReadFile(absPath)
+		if readErr != nil {
+			return "", "", provider.TokenEstimate{}, readErr
+		}
+		return string(raw), "full", originalEst, nil
+	}
+
+	// Signatures mode: prefer LSP symbol outline; fall back to first 60 lines.
+	sigText := ""
+	gotSymbols := false
+
+	if langProv != nil {
+		if res, symErr := langProv.GetSymbols(ctx, absPath); symErr == nil && len(res.Data) > 0 {
+			sigText = renderSymbolOutline(absPath, res.Data)
+			gotSymbols = true
+		}
+	}
+
+	if !gotSymbols {
+		// Fall back to first 60 lines — still much cheaper than the full file.
+		sigText, err = readFirstLines(absPath, 60)
+		if err != nil {
+			return "", "", provider.TokenEstimate{}, err
+		}
+	}
+
+	// Recompute token estimate from actual content length.
+	sigTokens := len(sigText) / 4
+	if sigTokens < 1 {
+		sigTokens = 1
+	}
+	sigEst := provider.TokenEstimate{
+		Tokens:     sigTokens,
+		Method:     "heuristic_chars_div4",
+		IsEstimate: true,
+	}
+
+	return sigText, "signatures", sigEst, nil
+}
+
+// renderSymbolOutline formats a flat list of dotted symbol names (e.g.
+// "MainViewModel", "MainViewModel.Title", "MainViewModel.LoadGames") into a
+// compact, human-readable outline block that agents can read as a structural
+// summary of the file.
+//
+// Example output:
+//
+//	// Symbol outline: MainViewModel.cs
+//	MainViewModel
+//	  .Title
+//	  .IsLoading
+//	  .LoadGames
+func renderSymbolOutline(absPath string, names []string) string {
+	var sb strings.Builder
+	sb.WriteString("// Symbol outline: ")
+	sb.WriteString(filepath.Base(absPath))
+	sb.WriteByte('\n')
+
+	for _, name := range names {
+		// Indent child symbols (those with a "." separator) relative to their parent.
+		if idx := strings.IndexByte(name, '.'); idx >= 0 {
+			sb.WriteString("  .")
+			sb.WriteString(name[idx+1:])
+		} else {
+			sb.WriteString(name)
+		}
+		sb.WriteByte('\n')
+	}
+
+	return sb.String()
+}
+
+// readFirstLines returns the first n lines of the file at absPath as a string.
+// Used as a fallback when symbol extraction is not available.
+func readFirstLines(absPath string, n int) (string, error) {
+	f, err := os.Open(absPath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	var sb strings.Builder
+	scanner := bufio.NewScanner(f)
+	lineCount := 0
+	for scanner.Scan() && lineCount < n {
+		sb.WriteString(scanner.Text())
+		sb.WriteByte('\n')
+		lineCount++
+	}
+	if err := scanner.Err(); err != nil {
+		return "", err
+	}
+	return sb.String(), nil
 }

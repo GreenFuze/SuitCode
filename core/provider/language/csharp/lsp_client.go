@@ -191,6 +191,65 @@ func (c *csharpLspClient) FileReferences(ctx context.Context, absPath string) ([
 	return result, nil
 }
 
+// DocumentSymbols returns the full document symbol tree for the file at absPath.
+//
+// Protocol:
+//  1. textDocument/didOpen       — open the seed file
+//  2. textDocument/documentSymbol — enumerate all symbols
+//  3. textDocument/didClose      — always deferred
+//
+// Returns nil slice (no error) when the file has no symbols.
+func (c *csharpLspClient) DocumentSymbols(ctx context.Context, absPath string) ([]lsp.DocumentSymbol, error) {
+	// Read the file content — csharp-ls needs the full text in didOpen.
+	content, err := os.ReadFile(absPath)
+	if err != nil {
+		return nil, fmt.Errorf("csharp-ls: reading %s: %w", absPath, err)
+	}
+
+	uri := lsp.PathToURI(absPath)
+
+	// Open the document so csharp-ls can serve symbol queries.
+	didOpenParams := map[string]any{
+		"textDocument": map[string]any{
+			"uri":        uri,
+			"languageId": "csharp",
+			"version":    1,
+			"text":       string(content),
+		},
+	}
+	if err := c.transport.SendNotify("textDocument/didOpen", didOpenParams); err != nil {
+		return nil, fmt.Errorf("csharp-ls: didOpen %s: %w", absPath, err)
+	}
+
+	// Always close the document when done.
+	defer func() {
+		_ = c.transport.SendNotify("textDocument/didClose", map[string]any{
+			"textDocument": map[string]any{"uri": uri},
+		})
+	}()
+
+	// Request document symbols.
+	symParams := map[string]any{
+		"textDocument": map[string]any{"uri": uri},
+	}
+	raw, err := c.transport.SendRequest(ctx, "textDocument/documentSymbol", symParams)
+	if err != nil {
+		return nil, fmt.Errorf("csharp-ls: documentSymbol %s: %w", absPath, err)
+	}
+
+	// csharp-ls returns JSON null for files with no symbols.
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+
+	var symbols []lsp.DocumentSymbol
+	if err := json.Unmarshal(raw, &symbols); err != nil {
+		return nil, fmt.Errorf("csharp-ls: unmarshalling symbols for %s: %w", absPath, err)
+	}
+
+	return symbols, nil
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Internal helpers
 // ──────────────────────────────────────────────────────────────────────────────

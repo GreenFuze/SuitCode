@@ -500,7 +500,15 @@ func (inv *ProjectInvestigator) Context(ctx context.Context, req cfeatures.Conte
 	if err != nil {
 		return nil, fmt.Errorf("context: %w", err)
 	}
-	return invfeatures.RunContext(ctx, req, listing, inv.estimator, inv.langDispatcher)
+
+	// Avoid the Go nil-interface pitfall: a typed-nil *vcs.Provider passed as
+	// ChangedFilesProvider is non-nil at the interface level and would panic on
+	// method calls inside RunContext. Pass an explicit nil interface instead.
+	var vcsProv invfeatures.ChangedFilesProvider
+	if inv.vcsProvider != nil {
+		vcsProv = inv.vcsProvider
+	}
+	return invfeatures.RunContext(ctx, req, listing, inv.estimator, inv.langDispatcher, vcsProv)
 }
 
 func (inv *ProjectInvestigator) FailureContext(ctx context.Context, req cfeatures.FailureContextRequest) (resp *cfeatures.FailureContextResponse, retErr error) {

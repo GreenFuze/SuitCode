@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GreenFuze/SuitCode/core/lsp"
 	"github.com/GreenFuze/SuitCode/core/provider"
 )
 
@@ -206,21 +207,81 @@ func (p *CSHarpLanguageProvider) GetImports(_ context.Context, filePath string) 
 	}, nil
 }
 
-// GetSymbols is not implemented — symbol extraction for C# requires Roslyn or an
-// LSP server, which are not available without a .NET SDK in PATH.
-// Always returns a "not_implemented" Limitation rather than an empty-but-authoritative
-// result, so callers know the absence of symbols is a tooling gap, not an empty file.
-func (p *CSHarpLanguageProvider) GetSymbols(_ context.Context, filePath string) (*provider.ProviderResult[[]string], error) {
-	p.mu.RLock()
-	lims := copyLimitations(p.limitations)
-	p.mu.RUnlock()
+// GetSymbols returns the symbol names defined in the file at filePath using csharp-ls.
+//
+// Requires csharp-ls: uses textDocument/documentSymbol for file-level symbol extraction.
+// Fail-fast: if csharp-ls is not installed, returns empty data and a "tool_not_available"
+// Limitation — does NOT silently return nothing, so callers know the gap.
+func (p *CSHarpLanguageProvider) GetSymbols(ctx context.Context, filePath string) (*provider.ProviderResult[[]string], error) {
+	start := time.Now()
 
-	lims = append(lims, provider.Limitation{
-		Kind:    "not_implemented",
-		Message: "symbol extraction for C# requires Roslyn or a Language Server Protocol server — not yet integrated into SuitCode",
-		Scope:   filePath,
-	})
-	return &provider.ProviderResult[[]string]{Limitations: lims}, nil
+	// Fail fast when csharp-ls is not available.
+	if p.lspClient == nil {
+		p.mu.RLock()
+		lims := copyLimitations(p.limitations)
+		p.mu.RUnlock()
+
+		lims = append(lims, provider.Limitation{
+			Kind:    "tool_not_available",
+			Message: "csharp-ls is required for symbol extraction but is not installed. Run 'suitcode installdeps' to install it.",
+			Scope:   filePath,
+		})
+		return &provider.ProviderResult[[]string]{
+			Data:        []string{},
+			Limitations: lims,
+			DurationMs:  time.Since(start).Milliseconds(),
+		}, nil
+	}
+
+	// LSP path: file-level symbols via csharp-ls textDocument/documentSymbol.
+	symbols, err := p.lspClient.DocumentSymbols(ctx, filePath)
+	if err != nil {
+		return &provider.ProviderResult[[]string]{
+			Data: []string{},
+			Limitations: []provider.Limitation{{
+				Kind:    "lsp_error",
+				Message: fmt.Sprintf("csharp-ls documentSymbol failed for %s: %v", filePath, err),
+				Scope:   filePath,
+			}},
+			DurationMs: time.Since(start).Milliseconds(),
+		}, nil
+	}
+
+	names := flattenCSSymbolNames(symbols)
+
+	return &provider.ProviderResult[[]string]{
+		Data: names,
+		Provenance: []provider.Provenance{{
+			SourceKind:      provider.SourceKindLSP,
+			SourceTool:      "csharp-ls:textDocument/documentSymbol",
+			Authority:       provider.AuthorityVerified,
+			EvidenceSummary: fmt.Sprintf("document symbols in %s via csharp-ls", filePath),
+			EvidencePaths:   []string{filePath},
+		}},
+		DurationMs: time.Since(start).Milliseconds(),
+	}, nil
+}
+
+// flattenCSSymbolNames recursively collects symbol names from a hierarchical
+// document symbol tree. Top-level symbols produce "Name"; nested symbols
+// (methods, fields, properties) produce "Parent.Name".
+func flattenCSSymbolNames(symbols []lsp.DocumentSymbol) []string {
+	return flattenCSNamesWithPrefix(symbols, "")
+}
+
+func flattenCSNamesWithPrefix(symbols []lsp.DocumentSymbol, prefix string) []string {
+	var names []string
+	for _, sym := range symbols {
+		name := sym.Name
+		if prefix != "" {
+			name = prefix + "." + sym.Name
+		}
+		names = append(names, name)
+		if len(sym.Children) > 0 {
+			names = append(names, flattenCSNamesWithPrefix(sym.Children, name)...)
+		}
+	}
+	return names
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

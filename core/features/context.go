@@ -17,6 +17,20 @@ type ContextRequest struct {
 	// Seeds are always included regardless of this filter.
 	// Example: []string{"imports","importers"} returns only the critical path.
 	Relations []string
+	// Depth controls how much of each file is included in the capsule.
+	// "full" (default) includes the complete file content.
+	// "signatures" includes a compact symbol outline (type names, method
+	// signatures, property declarations) instead of full content. Token cost
+	// is typically 5–15× lower than full content. Falls back to the first
+	// 60 lines when no language provider can extract symbols for a file.
+	Depth string
+	// ChangedSince, if set to a git ref (e.g. "main", "HEAD~3"), applies
+	// differential depth: files changed since that ref receive the mode
+	// specified by Depth (default: full content); files that have NOT changed
+	// receive signature-only content regardless of the Depth flag. This
+	// dramatically reduces token cost for sessions where most context files
+	// are stable background code and only a few files are actively changing.
+	ChangedSince string
 }
 
 // ContextFact is one piece of content included in the capsule.
@@ -88,8 +102,14 @@ type ContextFileEntry struct {
 	Score float64 `json:"score"`
 	// Reason explains why this file was included.
 	Reason string `json:"reason"`
-	// Content is the full text of the file as included in the capsule.
+	// Content is the file text included in the capsule. When ContentMode is
+	// "signatures" this is a compact symbol outline, not the full file.
 	Content string `json:"content"`
+	// ContentMode is "full" when the complete file is included, "signatures"
+	// when only a compact symbol outline is present (set by --depth signatures
+	// or --changed-since when the file has not changed since the given ref).
+	// Omitted (empty string) for backward compatibility when mode is "full".
+	ContentMode string `json:"content_mode,omitempty"`
 }
 
 // ContextResponse is the structured result of a context run.

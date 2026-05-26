@@ -125,7 +125,9 @@ COMMANDS:
                    command. Candidates are scored and ranked by relevance, then
                    trimmed to fit the budget.
                      --files <f1,f2,...>  or  --from <git-ref>  [one required]
-                     --budget <tokens>    (default 8000)
+                     --budget <tokens>         (default 8000)
+                     --depth <full|signatures> (default full; signatures ~5-15x fewer tokens)
+                     --changed-since <git-ref> (full/sigs for changed; sigs-only for stable)
 
   failure-context  Extract structured context from a build or test failure log:
                    suspected source files, test names, and a bounded context
@@ -884,6 +886,8 @@ func newContextCmd(repoPath string) *cobra.Command {
 	var budget int
 	var format string
 	var relations string
+	var depth string
+	var changedSince string
 
 	cmd := &cobra.Command{
 		Use:   "context",
@@ -904,7 +908,9 @@ func newContextCmd(repoPath string) *cobra.Command {
 				BaseFeatureRequest: cfeatures.BaseFeatureRequest{
 					RepoPath: repoPath, Budget: budget, Format: cfeatures.OutputFormat(format),
 				},
-				DiffRef: from,
+				DiffRef:      from,
+				Depth:        depth,
+				ChangedSince: changedSince,
 			}
 			if files != "" {
 				req.Files = absPathList(splitComma(files))
@@ -983,7 +989,11 @@ func newContextCmd(repoPath string) *cobra.Command {
 
 				for _, f := range resp.Files {
 					label := contextRelationLabel(f.Score)
-					fmt.Printf("  %-11s %-6d tok  %s\n", label, f.TokenEstimate, f.RelPath)
+					modeTag := ""
+					if f.ContentMode == "signatures" {
+						modeTag = " [sig]"
+					}
+					fmt.Printf("  %-11s %-6d tok  %s%s\n", label, f.TokenEstimate, f.RelPath, modeTag)
 				}
 
 				// Omitted tier-2 summary.
@@ -1008,6 +1018,12 @@ func newContextCmd(repoPath string) *cobra.Command {
 	cmd.Flags().StringVar(&format, "format", "", "output format: json (default: brief summary)")
 	cmd.Flags().StringVar(&relations, "relations", "",
 		"comma-separated relation types: imports,importers,peers,tests (default: all)")
+	cmd.Flags().StringVar(&depth, "depth", "",
+		"content depth: full (default, complete file text) or signatures"+
+			" (compact symbol outline — ~5-15× fewer tokens)")
+	cmd.Flags().StringVar(&changedSince, "changed-since", "",
+		"git ref (e.g. main, HEAD~3): changed files get --depth content,"+
+			" unchanged files get signature-only outlines to save tokens")
 	return cmd
 }
 

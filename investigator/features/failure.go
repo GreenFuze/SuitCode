@@ -215,6 +215,7 @@ func RunFailureContext(
 			listing,
 			estimator,
 			langProv,
+			nil, // no VCS provider needed for failure-context capsule
 		)
 		if err == nil {
 			resp.RelatedContext = ctxResp.Capsule
