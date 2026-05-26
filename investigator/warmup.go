@@ -49,10 +49,12 @@ func (inv *ProjectInvestigator) Warm(ctx context.Context) error {
 	inv.readiness = ReadinessLevel2
 	logf("readiness level 2 — file index ready (%d files)", listing.Data.TotalFiles)
 
-	// ── Level 3: import graph + gopls ─────────────────────────────────────────
-	// Release the lock before waiting for gopls. Feature calls at Level 2 can
-	// proceed with the file index and import graph while the LSP handshake
-	// completes. gopls typically takes 10–30 s; we cap at 90 s.
+	// ── Level 3: import graph + language servers ──────────────────────────────
+	// Release the lock before waiting for async LSP daemons. Feature calls at
+	// Level 2 can proceed with the file index and import graph while the LSP
+	// handshakes complete. LSP startup (e.g. gopls) typically takes 10–30 s;
+	// we cap at 90 s. Language servers that initialize synchronously (e.g.
+	// csharp-ls) are already ready before this point.
 	hasLang := inv.langDispatcher.HasAnyLanguageProvider()
 	inv.mu.Unlock()
 
@@ -64,7 +66,7 @@ func (inv *ProjectInvestigator) Warm(ctx context.Context) error {
 		inv.mu.Lock()
 		inv.readiness = ReadinessLevel3
 		if goplsOK {
-			logf("readiness level 3 — package graph + gopls ready")
+			logf("readiness level 3 — package graph + language servers ready")
 		} else {
 			logf("readiness level 3 — package graph ready (gopls not ready within 90s)")
 		}

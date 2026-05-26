@@ -67,7 +67,11 @@ GOBIN="${GOPATH:-$HOME/go}/bin"
 
 echo ""
 echo "  suitcode       ✓"
-echo "  coordinator    ✓  (tray icon included)"
+if [ "$CI" -eq 1 ]; then
+  echo "  coordinator    ✓  (headless — no tray icon)"
+else
+  echo "  coordinator    ✓  (tray icon included)"
+fi
 echo "  investigator   ✓"
 echo ""
 

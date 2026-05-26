@@ -426,8 +426,8 @@ func newWarmupCmd(repoPath string) *cobra.Command {
 		Use:   "warmup",
 		Short: "Pre-warm the investigator (spawns it and waits for level 3 readiness)",
 		Long: `Spawns the investigator for this project and waits until it reaches
-readiness level 3 (import graph + gopls ready). This can take 30–90 seconds
-on first run. Subsequent calls return immediately.
+readiness level 3 (import graph + language servers ready). This can take
+30–90 seconds on first run. Subsequent calls return immediately.
 
 Run this before a coding session to avoid cold-start latency on the first
 agent invocation.`,
@@ -441,7 +441,7 @@ agent invocation.`,
 
 			start := time.Now()
 
-			stopWarm := logProgress("waiting for investigator to warm up and reach level 3 readiness (import graph + gopls)...")
+			stopWarm := logProgress("waiting for investigator to warm up and reach level 3 readiness (import graph + language servers)...")
 			err = client.Warmup(cmd.Context())
 			stopWarm()
 			if err != nil {

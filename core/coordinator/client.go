@@ -211,7 +211,7 @@ func (c *Client) GetProjects(ctx context.Context) (*ProjectsResponse, error) {
 
 // Warmup ensures the investigator for this project is fully initialized.
 // The coordinator spawns the investigator on demand and blocks until it reaches
-// level 3 readiness (import graph + gopls ready). Idempotent.
+// level 3 readiness (import graph + language servers ready). Idempotent.
 func (c *Client) Warmup(ctx context.Context) error {
 	url := c.coordinatorURL + "/api/v1/warmup"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, http.NoBody)
