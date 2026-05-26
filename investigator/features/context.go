@@ -211,7 +211,13 @@ func RunContext(
 		return candidates[i].file.RelPath < candidates[j].file.RelPath
 	})
 
-	// ── Budget selection ───────────────────────────────────────────────────────
+	// ── Budget selection (soft limit) ────────────────────────────────────────
+	//
+	// All scored candidates are included in the response. Seed files (score=1.0)
+	// are never dropped — the caller explicitly requested them. Other candidates
+	// are included in rank order. When the total exceeds the requested budget a
+	// "budget_exceeded" limitation is appended so the agent knows the response
+	// is larger than requested and can decide how to proceed.
 
 	totalCandidateTokens := 0
 	for _, c := range candidates {
@@ -224,20 +230,6 @@ func RunContext(
 	}
 
 	for rank, c := range candidates {
-		if tokenUsed+c.est.Tokens > budget {
-			// Record as rejection.
-			capsule.Rejections = append(capsule.Rejections, cfeatures.ContextRejection{
-				Candidate: cfeatures.ContextCandidate{
-					File:          fileToRef(c.file, fsProv(c.reason, c.file.Path)),
-					Score:         c.score,
-					ScoreReasons:  []string{c.reason},
-					TokenEstimate: c.est,
-				},
-				Reason: fmt.Sprintf("budget exhausted (%d/%d tokens used)", tokenUsed, budget),
-			})
-			continue
-		}
-
 		// Read the file content for the capsule.
 		content, err := os.ReadFile(c.file.Path)
 		if err != nil {
@@ -267,11 +259,24 @@ func RunContext(
 		})
 
 		capsule.Facts = append(capsule.Facts, cfeatures.ContextFact{
-			Kind:    "file_content",
-			Content: string(content),
-			Source:  fileToRef(c.file, prov),
-			Provenance: prov,
+			Kind:          "file_content",
+			Content:       string(content),
+			Source:        fileToRef(c.file, prov),
+			Provenance:    prov,
 			TokenEstimate: c.est,
+		})
+	}
+
+	// Report overage when total tokens exceed the requested budget.
+	if tokenUsed > budget {
+		overage := tokenUsed - budget
+		overagePct := int(float64(overage) / float64(budget) * 100)
+		resp.Limitations = append(resp.Limitations, provider.Limitation{
+			Kind: "budget_exceeded",
+			Message: fmt.Sprintf(
+				"context is %d%% over requested budget: %d tokens used vs %d requested (%d tokens over); all relevant files included",
+				overagePct, tokenUsed, budget, overage,
+			),
 		})
 	}
 

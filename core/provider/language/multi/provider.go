@@ -306,9 +306,32 @@ func (m *MultiLangProvider) mergeStringSlice(
 	return &provider.ProviderResult[[]string]{
 		Data:        allData,
 		Provenance:  allProvenance,
-		Limitations: allLimitations,
+		Limitations: dedupLimitations(allLimitations),
 		DurationMs:  time.Since(start).Milliseconds(),
 	}, nil
+}
+
+// dedupLimitations removes duplicate Limitation entries, preserving the first
+// occurrence of each (kind, scope, message) triple. This prevents the same
+// limitation from appearing multiple times when multiple underlying providers
+// independently report it for the same file/scope.
+func dedupLimitations(in []provider.Limitation) []provider.Limitation {
+	if len(in) == 0 {
+		return in
+	}
+
+	type key struct{ kind, scope, message string }
+	seen := make(map[key]bool, len(in))
+	out := make([]provider.Limitation, 0, len(in))
+
+	for _, l := range in {
+		k := key{kind: l.Kind, scope: l.Scope, message: l.Message}
+		if !seen[k] {
+			seen[k] = true
+			out = append(out, l)
+		}
+	}
+	return out
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"fyne.io/systray"
+	"github.com/GreenFuze/SuitCode/calllog"
 	coord "github.com/GreenFuze/SuitCode/core/coordinator"
 )
 
@@ -31,8 +32,8 @@ const (
 	trayPollInterval = 5 * time.Second
 
 	// maxProjectSlots controls how many investigators can be shown in the
-	// tray menu simultaneously. Each slot occupies 6 items (header + 4 actions
-	// + visual separator), so keep this low to avoid a crowded menu.
+	// tray menu simultaneously. Each slot is one top-level sub-menu item, so
+	// adding more than ~6 makes the menu tall; 4 is a comfortable default.
 	maxProjectSlots = 4
 )
 
@@ -142,29 +143,29 @@ type trayMenu struct {
 	mQuit *systray.MenuItem
 }
 
-// projectSlot is a flat group of pre-allocated menu items for one active
-// investigator project. The items are ordinary (non-nested) menu items laid
-// out in sequence:
+// projectSlot is one pre-allocated sub-menu entry for an active investigator.
 //
-//	[mHeader ] ← disabled header, shows the full project path
-//	[mCopyLog] ← "  Copy Coordinator Log"
-//	[mCopyMet] ← "  Copy Metrics"
-//	[mOpenDir] ← "  Open Project Folder"
-//	[mStop   ] ← "  Stop Investigator"
-//	[mSep    ] ← "─────────────────────" (disabled visual separator)
+//	[mParent ] ← top-level item; hovering it reveals a fly-out sub-menu (▶)
+//	  [mCopyLog] ← "Copy Coordinator Log"
+//	  [mCopyMet] ← "Copy Metrics"
+//	  [mOpenDir] ← "Open Project Folder"
+//	  [mStop   ] ← "Stop Investigator"
 //
-// WHY FLAT INSTEAD OF SUB-MENUS? fyne.io/systray's Windows backend converts
-// a menu item into a sub-menu by calling SetMenuItemInfo on the parent while
-// it is present in the native HMENU. Pre-allocating hidden items and later
-// showing them prevents that call from succeeding, leaving the sub-menu handle
-// orphaned. Flat items with hide/show are fully supported and reliable.
+// ORDERING CONSTRAINT (fyne.io/systray Windows backend):
+// convertToSubMenu calls SetMenuItemInfo to attach a child HMENU to mParent.
+// This only succeeds while mParent is present in the root HMENU. Calling
+// mParent.Hide() before AddSubMenuItem removes mParent from the HMENU first,
+// so SetMenuItemInfo fails silently and the item stays a plain button (no ▶).
+//
+// Fix applied in build(): add ALL sub-items first (mParent is still in the
+// root HMENU), then call mParent.Hide(). The child HMENU is already attached
+// and survives Hide/Show cycles correctly thereafter.
 type projectSlot struct {
-	mHeader  *systray.MenuItem // disabled; title = full project path
-	mCopyLog *systray.MenuItem // "  Copy Coordinator Log"
-	mCopyMet *systray.MenuItem // "  Copy Metrics"
-	mOpenDir *systray.MenuItem // "  Open Project Folder"
-	mStop    *systray.MenuItem // "  Stop Investigator"
-	mSep     *systray.MenuItem // visual separator (disabled dashes)
+	mParent  *systray.MenuItem // top-level sub-menu trigger; title = project path
+	mCopyLog *systray.MenuItem // sub-item: "Copy Coordinator Log"
+	mCopyMet *systray.MenuItem // sub-item: "Copy Metrics"
+	mOpenDir *systray.MenuItem // sub-item: "Open Project Folder"
+	mStop    *systray.MenuItem // sub-item: "Stop Investigator"
 
 	mu          sync.Mutex
 	projectPath string           // empty when slot is hidden
@@ -185,37 +186,33 @@ func (m *trayMenu) build() {
 	m.mNoProjects = systray.AddMenuItem("No active projects — run 'suitcode <path> warmup'", "")
 	m.mNoProjects.Disable()
 
-	// Pre-allocate project slots. Each slot is a group of flat menu items.
-	// All items start hidden; updateProjects shows/hides them as needed.
+	// Pre-allocate project slots. Each slot is a sub-menu item: the parent
+	// appears as a top-level entry with a ▶ arrow; hovering reveals the
+	// fly-out with the four action items.
+	//
+	// CRITICAL ORDER: AddSubMenuItem must be called while mParent is still
+	// present in the root HMENU (i.e., before mParent.Hide()). See the
+	// projectSlot comment for the full explanation.
 	for i := range m.slots {
-		mHeader := systray.AddMenuItem("", "Active investigator project")
-		mHeader.Disable()
-		mHeader.Hide()
+		// Add parent to the root HMENU first (still visible at this point).
+		mParent := systray.AddMenuItem("(no project)", "Active investigator project")
 
-		mCopyLog := systray.AddMenuItem("  Copy Coordinator Log", "Copy the coordinator log file to the clipboard")
-		mCopyLog.Hide()
+		// Add sub-items while mParent is in the root HMENU — this is what
+		// makes convertToSubMenu's SetMenuItemInfo call succeed on Windows.
+		mCopyLog := mParent.AddSubMenuItem("Copy Coordinator Log", "Copy the coordinator log file to the clipboard")
+		mCopyMet := mParent.AddSubMenuItem("Copy Metrics", "Copy investigator metrics and session summary to the clipboard")
+		mOpenDir := mParent.AddSubMenuItem("Open Project Folder", "Open the project directory in the system file manager")
+		mStop := mParent.AddSubMenuItem("Stop Investigator", "Terminate the investigator process for this project")
 
-		mCopyMet := systray.AddMenuItem("  Copy Metrics", "Copy investigator status and metrics to the clipboard")
-		mCopyMet.Hide()
-
-		mOpenDir := systray.AddMenuItem("  Open Project Folder", "Open the project directory in the system file manager")
-		mOpenDir.Hide()
-
-		mStop := systray.AddMenuItem("  Stop Investigator", "Terminate the investigator process for this project")
-		mStop.Hide()
-
-		// Visual separator between project groups.
-		mSep := systray.AddMenuItem("────────────────────────────────", "")
-		mSep.Disable()
-		mSep.Hide()
+		// Hide AFTER sub-items are attached so the child HMENU is wired up.
+		mParent.Hide()
 
 		s := &projectSlot{
-			mHeader:  mHeader,
+			mParent:  mParent,
 			mCopyLog: mCopyLog,
 			mCopyMet: mCopyMet,
 			mOpenDir: mOpenDir,
 			mStop:    mStop,
-			mSep:     mSep,
 		}
 		m.slots[i] = s
 		go m.runSlotHandler(s)
@@ -381,8 +378,8 @@ func (m *trayMenu) refreshStatus() {
 
 // ── projectSlot helpers ───────────────────────────────────────────────────────
 
-// setProjectInfo updates the slot with live project data and reveals all
-// group items so the user can see and interact with the investigator.
+// setProjectInfo updates the slot with live project data and reveals the
+// sub-menu parent so the user can hover to access the action items.
 func (s *projectSlot) setProjectInfo(info coord.ProjectInfo) {
 	s.mu.Lock()
 	s.projectPath = info.ProjectPath
@@ -394,16 +391,9 @@ func (s *projectSlot) setProjectInfo(info coord.ProjectInfo) {
 		return
 	}
 
-	// Update header text to the full project path.
-	s.mHeader.SetTitle(info.ProjectPath)
-
-	// Reveal the entire group.
-	s.mHeader.Show()
-	s.mCopyLog.Show()
-	s.mCopyMet.Show()
-	s.mOpenDir.Show()
-	s.mStop.Show()
-	s.mSep.Show()
+	// Update the parent item's title to the full project path and reveal it.
+	s.mParent.SetTitle(info.ProjectPath)
+	s.mParent.Show()
 }
 
 // clearProject hides the slot, removing it from the visible menu.
@@ -416,15 +406,10 @@ func (s *projectSlot) clearProject() {
 	s.hideAll()
 }
 
-// hideAll hides every menu item in this slot. Thread-safe (systray ops are
-// channel-based); does not need the slot mutex.
+// hideAll hides the parent item, collapsing the entire sub-menu entry.
+// Thread-safe (systray ops are channel-based); does not need the slot mutex.
 func (s *projectSlot) hideAll() {
-	s.mHeader.Hide()
-	s.mCopyLog.Hide()
-	s.mCopyMet.Hide()
-	s.mOpenDir.Hide()
-	s.mStop.Hide()
-	s.mSep.Hide()
+	s.mParent.Hide()
 }
 
 func (s *projectSlot) getProject() string {
@@ -569,8 +554,9 @@ func readCoordinatorLog() (string, error) {
 }
 
 // formatProjectMetrics builds a human-readable summary of an investigator's
-// status. It attempts a lightweight HTTP call to the investigator's health
-// endpoint to include the current readiness level.
+// status and session call statistics. It fetches the current readiness level
+// from the investigator's health endpoint and reads the project's call log to
+// produce a session summary via calllog.PrintAggregateSummary.
 func formatProjectMetrics(info coord.ProjectInfo) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Project:   %s\n", info.ProjectPath))
@@ -579,8 +565,8 @@ func formatProjectMetrics(info coord.ProjectInfo) string {
 
 	// Fetch current readiness level directly from the investigator.
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", info.Port)
-	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get(baseURL + "/api/v1/health")
+	httpClient := &http.Client{Timeout: 2 * time.Second}
+	resp, err := httpClient.Get(baseURL + "/api/v1/health")
 	if err == nil && resp.Body != nil {
 		defer resp.Body.Close()
 
@@ -590,6 +576,17 @@ func formatProjectMetrics(info coord.ProjectInfo) string {
 		if json.NewDecoder(resp.Body).Decode(&health) == nil {
 			sb.WriteString(fmt.Sprintf("Readiness: %d/3\n", health.ReadinessLevel))
 		}
+	}
+
+	// Append session call summary from the project's call log.
+	sb.WriteString("\n")
+	logger, logErr := calllog.New(info.ProjectPath)
+	if logErr == nil {
+		if printErr := logger.PrintAggregateSummary(&sb, 0); printErr != nil {
+			sb.WriteString(fmt.Sprintf("(call log unavailable: %v)\n", printErr))
+		}
+	} else {
+		sb.WriteString(fmt.Sprintf("(call log unavailable: %v)\n", logErr))
 	}
 
 	return sb.String()

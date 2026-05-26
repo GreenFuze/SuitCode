@@ -13,6 +13,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -122,8 +124,15 @@ func (p *PythonLanguageProvider) GetImports(_ context.Context, filePath string) 
 }
 
 // GetSymbols is not yet implemented for Python (requires an LSP like pylsp or
-// Pyright). Returns a "lsp_not_available" Limitation.
+// Pyright). Returns a "lsp_not_available" Limitation only for .py files.
+// Files of other languages are silently ignored so the multi-provider does not
+// emit spurious limitations for unrelated file types.
 func (p *PythonLanguageProvider) GetSymbols(_ context.Context, filePath string) (*provider.ProviderResult[[]string], error) {
+	// Only emit limitations for files this provider actually handles.
+	if strings.ToLower(filepath.Ext(filePath)) != ".py" {
+		return &provider.ProviderResult[[]string]{}, nil
+	}
+
 	p.mu.RLock()
 	lims := copyLimitations(p.limitations)
 	p.mu.RUnlock()

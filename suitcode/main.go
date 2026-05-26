@@ -785,16 +785,36 @@ func newContextCmd(repoPath string) *cobra.Command {
 
 			return printFeatureResult(resp, format, func(resp *cfeatures.ContextResponse) {
 				printProgress(resp.BaseFeatureResponse)
-				saved := int((1 - resp.CompressionRatio) * 100)
-				fmt.Printf("Context capsule: %d files · %d/%d tokens (%d%% saved)\n",
-					resp.FilesIncluded, resp.Metrics.Budget.Used, resp.Metrics.Budget.Requested, saved)
+
+				// Check for budget overage limitation.
+				budgetExceeded := false
+				for _, lim := range resp.Limitations {
+					if lim.Kind == "budget_exceeded" {
+						budgetExceeded = true
+						break
+					}
+				}
+
+				if budgetExceeded {
+					overage := resp.Metrics.Budget.Used - resp.Metrics.Budget.Requested
+					overagePct := 0
+					if resp.Metrics.Budget.Requested > 0 {
+						overagePct = int(float64(overage) / float64(resp.Metrics.Budget.Requested) * 100)
+					}
+					fmt.Printf("Context capsule: %d files · %d tokens (%d%% over %d token budget)\n",
+						resp.FilesIncluded, resp.Metrics.Budget.Used, overagePct, resp.Metrics.Budget.Requested)
+				} else {
+					saved := int((1 - resp.CompressionRatio) * 100)
+					fmt.Printf("Context capsule: %d files · %d/%d tokens (%d%% saved)\n",
+						resp.FilesIncluded, resp.Metrics.Budget.Used, resp.Metrics.Budget.Requested, saved)
+				}
 
 				// Print per-file inclusion summary so agents can verify capsule contents.
 				for _, f := range resp.Files {
 					fmt.Printf("  included  %-6d tok  %s\n", f.TokenEstimate, f.RelPath)
 				}
 
-				// Print any files that were considered but excluded.
+				// Print any files that were considered but excluded (read errors only now).
 				for _, r := range resp.Capsule.Rejections {
 					fmt.Printf("  excluded              %s — %s\n", r.Candidate.File.RelPath, r.Reason)
 				}

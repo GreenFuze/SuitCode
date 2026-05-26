@@ -14,6 +14,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -124,9 +126,15 @@ func (p *JSLanguageProvider) GetImports(_ context.Context, filePath string) (*pr
 }
 
 // GetSymbols is not yet implemented for JS/TS (requires a TypeScript Language
-// Server subprocess). Returns a "lsp_not_available" Limitation. Callers should
-// treat the empty result gracefully.
+// Server subprocess). Returns a "lsp_not_available" Limitation only for files
+// that belong to this provider (JS/TS extensions). Files of other languages are
+// silently ignored so the multi-provider does not emit spurious limitations.
 func (p *JSLanguageProvider) GetSymbols(_ context.Context, filePath string) (*provider.ProviderResult[[]string], error) {
+	// Only emit limitations for files this provider actually handles.
+	if !jsExtensions[strings.ToLower(filepath.Ext(filePath))] {
+		return &provider.ProviderResult[[]string]{}, nil
+	}
+
 	p.mu.RLock()
 	lims := copyLimitations(p.limitations)
 	p.mu.RUnlock()
