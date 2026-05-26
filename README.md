@@ -6,6 +6,10 @@
 
 **Your coding agent actually knows your codebase. Not guesses — knows.**
 
+> **Measured on a real 500-file C# codebase, 2-day session, 89 calls:**
+> 54% of context calls were directly followed by a code edit — rising to ~80% once the agent calibrated its usage.
+> Average context compression: **10–40×** (500-file repo → 12–15 files loaded).
+
 ---
 
 ## The problem with AI coding agents
