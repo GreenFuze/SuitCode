@@ -5,20 +5,20 @@ import "github.com/GreenFuze/SuitCode/core/provider"
 // VerificationCommand is one command in a verification plan.
 type VerificationCommand struct {
 	// Command is the executable (e.g. "go").
-	Command string
+	Command string `json:"command"`
 	// Args are the command arguments (e.g. ["test", "./internal/...", "-run", "TestFoo"]).
-	Args []string
+	Args []string `json:"args"`
 	// Reason explains why this command was chosen.
-	Reason string
+	Reason string `json:"reason"`
 	// Kind categorises the command: "test", "build", "typecheck", "lint",
 	// "format", "vet".
-	Kind string
+	Kind string `json:"kind"`
 	// Required is true when skipping this command would leave the change
 	// unverified.
-	Required bool
+	Required bool `json:"required"`
 	// EstimatedCostHint is a rough timing hint if known (e.g. "fast", "slow").
-	EstimatedCostHint string
-	Provenance        provider.Provenance
+	EstimatedCostHint string             `json:"estimated_cost_hint,omitempty"`
+	Provenance        provider.Provenance `json:"provenance"`
 }
 
 // VerifyPlanRequest parameters for the verify-plan feature.
@@ -34,10 +34,10 @@ type VerifyPlanRequest struct {
 type VerifyPlanResponse struct {
 	BaseFeatureResponse
 
-	Commands           []VerificationCommand
-	CommandsConsidered int
-	CommandsSelected   int
-	RelatedTests       []TestReference
+	Commands           []VerificationCommand `json:"commands"`
+	CommandsConsidered int                   `json:"commands_considered"`
+	CommandsSelected   int                   `json:"commands_selected"`
+	RelatedTests       []TestReference       `json:"related_tests,omitempty"`
 
-	EstimatedContextAvoided provider.TokenEstimate
+	EstimatedContextAvoided provider.TokenEstimate `json:"estimated_context_avoided"`
 }

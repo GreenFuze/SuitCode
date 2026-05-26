@@ -18,12 +18,12 @@ const (
 
 // RelatedFile is a file with an annotated relationship to the query target.
 type RelatedFile struct {
-	File       provider.FileReference
-	Relation   RelationKind
-	Reason     string
-	Provenance provider.Provenance
+	File       provider.FileReference `json:"file"`
+	Relation   RelationKind           `json:"relation"`
+	Reason     string                 `json:"reason,omitempty"`
+	Provenance provider.Provenance    `json:"provenance"`
 	// Confidence is a 0–1 score. Higher means more certain.
-	Confidence float64
+	Confidence float64 `json:"confidence"`
 }
 
 // RelatedRequest parameters for the related feature.
@@ -37,14 +37,14 @@ type RelatedRequest struct {
 type RelatedResponse struct {
 	BaseFeatureResponse
 
-	TargetPath   string
-	RelatedFiles []RelatedFile
+	TargetPath   string        `json:"target_path"`
+	RelatedFiles []RelatedFile `json:"related_files,omitempty"`
 
-	FilesConsidered int
-	FilesIncluded   int
-	FilesExcluded   int
+	FilesConsidered int `json:"files_considered"`
+	FilesIncluded   int `json:"files_included"`
+	FilesExcluded   int `json:"files_excluded"`
 
 	// EstimatedContextAvoided is how many tokens a caller would NOT need to
 	// load, given that this response tells them which files matter.
-	EstimatedContextAvoided provider.TokenEstimate
+	EstimatedContextAvoided provider.TokenEstimate `json:"estimated_context_avoided"`
 }

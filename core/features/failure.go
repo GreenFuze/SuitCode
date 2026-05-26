@@ -7,10 +7,10 @@ import "github.com/GreenFuze/SuitCode/core/provider"
 type FailureSignal struct {
 	// Kind categorises the signal: "file_path", "test_name", "error_message",
 	// "stack_frame", "package", "line_ref".
-	Kind       string
-	Value      string
-	Confidence float64
-	Provenance provider.Provenance
+	Kind       string             `json:"kind"`
+	Value      string             `json:"value"`
+	Confidence float64            `json:"confidence"`
+	Provenance provider.Provenance `json:"provenance"`
 }
 
 // FailureContextRequest parameters for the failure-context feature.
@@ -27,15 +27,15 @@ type FailureContextResponse struct {
 	BaseFeatureResponse
 
 	// ParsedSignals lists structured signals extracted from the log.
-	ParsedSignals []FailureSignal
+	ParsedSignals []FailureSignal `json:"parsed_signals,omitempty"`
 	// SuspectedFiles are repository files mentioned or implied by the log.
-	SuspectedFiles []provider.FileReference
+	SuspectedFiles []provider.FileReference `json:"suspected_files,omitempty"`
 	// SuspectedTests are test names extracted from the log.
-	SuspectedTests []TestReference
+	SuspectedTests []TestReference `json:"suspected_tests,omitempty"`
 	// SuspectedCommands are commands (build/test/lint) implied by the log.
-	SuspectedCommands []string
+	SuspectedCommands []string `json:"suspected_commands,omitempty"`
 	// RelatedContext is a bounded capsule of relevant context for the failure.
-	RelatedContext ContextCapsule
+	RelatedContext ContextCapsule `json:"related_context"`
 
-	EstimatedContextAvoided provider.TokenEstimate
+	EstimatedContextAvoided provider.TokenEstimate `json:"estimated_context_avoided"`
 }
