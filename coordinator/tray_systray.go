@@ -133,6 +133,11 @@ type trayMenu struct {
 	// mStatus is a permanently disabled item showing coordinator connectivity.
 	mStatus *systray.MenuItem
 
+	// statusMu guards statusText so flashStatus can restore correctly when
+	// concurrent flashes race.
+	statusMu   sync.Mutex
+	statusText string // mirrors the last title set on mStatus
+
 	// mNoProjects is shown when no investigator projects are active. It is
 	// hidden whenever at least one project slot is visible.
 	mNoProjects *systray.MenuItem
@@ -228,7 +233,7 @@ func (m *trayMenu) build() {
 		mCopyCall       := mParent.AddSubMenuItem("Copy Call Log", "Copy the per-call detail log with seeds and limitation kinds to the clipboard")
 		mAnalyzeSession := mParent.AddSubMenuItem("Analyze Last Session", "Parse the most recent Claude Code session and compute heuristic quality signals")
 		mCopyAnalysis   := mParent.AddSubMenuItem("Copy Analysis Pack", "Copy the session analysis pack to clipboard for LLM review (shows privacy notice)")
-		mCopyPackPath   := mParent.AddSubMenuItem("Copy Pack Path", "Copy the analysis pack file path to clipboard — for local agents that can read files directly")
+		mCopyPackPath   := mParent.AddSubMenuItem("Copy Analysis Pack Path", "Copy the analysis pack file path to clipboard — for local agents that can read files directly")
 		mOpenDir        := mParent.AddSubMenuItem("Open Project Folder", "Open the project directory in the system file manager")
 		mStop           := mParent.AddSubMenuItem("Stop Investigator", "Terminate the investigator process for this project")
 
@@ -262,11 +267,39 @@ func (m *trayMenu) build() {
 	}()
 }
 
-// updateStatus sets the status row text. Safe from any goroutine.
+// updateStatus sets the status row text and records it for flashStatus.
+// Safe from any goroutine.
 func (m *trayMenu) updateStatus(text string) {
+	m.statusMu.Lock()
+	m.statusText = text
+	m.statusMu.Unlock()
 	if m.mStatus != nil {
 		m.mStatus.SetTitle(text)
 	}
+}
+
+// flashStatus temporarily replaces the status row with msg for duration, then
+// restores whatever text was set before the flash. Safe from any goroutine.
+func (m *trayMenu) flashStatus(msg string, duration time.Duration) {
+	m.statusMu.Lock()
+	restore := m.statusText
+	m.statusMu.Unlock()
+
+	if m.mStatus != nil {
+		m.mStatus.SetTitle(msg)
+	}
+	go func() {
+		time.Sleep(duration)
+		// Only restore if nobody called updateStatus in the meantime.
+		m.statusMu.Lock()
+		unchanged := m.statusText == restore
+		m.statusMu.Unlock()
+		if unchanged {
+			if m.mStatus != nil {
+				m.mStatus.SetTitle(restore)
+			}
+		}
+	}()
 }
 
 // updateProjects refreshes the project slots to match the given list.
@@ -570,10 +603,12 @@ func (m *trayMenu) handleCopyAnalysisPack(s *projectSlot) {
 
 	if err := copyToClipboard(string(data)); err != nil {
 		logf("tray: copy analysis pack: clipboard: %v", err)
+		m.flashStatus("✗ Copy failed — see log", 3*time.Second)
 		return
 	}
 
 	logf("tray: analysis pack copied to clipboard from %s", filepath.Base(path))
+	m.flashStatus("✓ Analysis pack copied to clipboard", 3*time.Second)
 }
 
 // handleCopyAnalysisPackPath copies only the file path of the most recently
@@ -592,19 +627,23 @@ func (m *trayMenu) handleCopyAnalysisPackPath(s *projectSlot) {
 	path, err := sessionanalysis.FindLatestAnalysisPack(info.ProjectPath)
 	if err != nil {
 		logf("tray: copy pack path: %v", err)
+		m.flashStatus("✗ Error finding pack — see log", 3*time.Second)
 		return
 	}
 	if path == "" {
 		logf("tray: copy pack path: no pack found — run 'Analyze Last Session' first")
+		m.flashStatus("✗ No pack yet — run Analyze Last Session first", 4*time.Second)
 		return
 	}
 
 	if err := copyToClipboard(path); err != nil {
 		logf("tray: copy pack path: clipboard: %v", err)
+		m.flashStatus("✗ Copy failed — see log", 3*time.Second)
 		return
 	}
 
 	logf("tray: analysis pack path copied to clipboard: %s", path)
+	m.flashStatus("✓ Analysis pack path copied to clipboard", 3*time.Second)
 }
 
 // showPrivacyDisclaimer presents a modal OK/Cancel dialog explaining that the
