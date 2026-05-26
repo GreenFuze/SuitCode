@@ -800,38 +800,37 @@ func newContextCmd(repoPath string) *cobra.Command {
 			return printFeatureResult(resp, format, func(resp *cfeatures.ContextResponse) {
 				printProgress(resp.BaseFeatureResponse)
 
-				// Check whether any files were trimmed by the hard budget cap.
-				budgetTrimmed := 0
+				// Check whether the structurally-related set exceeds the budget.
+				overBudget := false
 				for _, lim := range resp.Limitations {
-					if lim.Kind == "budget_trimmed" {
-						// Parse the trimmed count from the limitation message.
-						// Fall back to counting rejections with "budget cap" prefix.
+					if lim.Kind == "over_budget" {
+						overBudget = true
 						break
 					}
 				}
-				for _, r := range resp.Capsule.Rejections {
-					if strings.HasPrefix(r.Reason, "budget cap") {
-						budgetTrimmed++
-					}
-				}
 
-				saved := int((1 - resp.CompressionRatio) * 100)
-				if budgetTrimmed > 0 {
-					fmt.Printf("Context capsule: %d files · %d/%d tokens (%d%% saved, %d file(s) trimmed to fit budget)\n",
-						resp.FilesIncluded, resp.Metrics.Budget.Used, resp.Metrics.Budget.Requested, saved, budgetTrimmed)
+				if overBudget {
+					overage := resp.Metrics.Budget.Used - resp.Metrics.Budget.Requested
+					overagePct := 0
+					if resp.Metrics.Budget.Requested > 0 {
+						overagePct = int(float64(overage) / float64(resp.Metrics.Budget.Requested) * 100)
+					}
+					fmt.Printf("Context capsule: %d files · %d tokens (%d%% over %d token budget — all structurally related files included)\n",
+						resp.FilesIncluded, resp.Metrics.Budget.Used, overagePct, resp.Metrics.Budget.Requested)
 				} else {
+					saved := int((1 - resp.CompressionRatio) * 100)
 					fmt.Printf("Context capsule: %d files · %d/%d tokens (%d%% saved)\n",
 						resp.FilesIncluded, resp.Metrics.Budget.Used, resp.Metrics.Budget.Requested, saved)
 				}
 
 				// Print per-file inclusion summary so agents can verify capsule contents.
 				for _, f := range resp.Files {
-					fmt.Printf("  included  %-6d tok  %s\n", f.TokenEstimate, f.RelPath)
+					fmt.Printf("  %-8s %-6d tok  %s\n", f.Role, f.TokenEstimate, f.RelPath)
 				}
 
-				// Print excluded files (budget-trimmed and read-error rejections).
+				// Print rejected files (read errors only — no budget rejections now).
 				for _, r := range resp.Capsule.Rejections {
-					fmt.Printf("  excluded              %s — %s\n", r.Candidate.File.RelPath, r.Reason)
+					fmt.Printf("  error                 %s — %s\n", r.Candidate.File.RelPath, r.Reason)
 				}
 			}, func() {
 				printCallLog("context", resp.BaseFeatureResponse, resp.FilesIncluded, resp.FilesConsidered, resp.CompressionRatio)

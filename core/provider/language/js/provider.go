@@ -215,6 +215,21 @@ func (p *JSLanguageProvider) FileImporters(_ context.Context, filePath string) (
 	}, nil
 }
 
+// FilePeers returns an empty result for JS/TS. In JavaScript each file is its
+// own module — there is no compilation-unit concept that groups source files
+// together the way Go packages or C# projects do. The import graph
+// (FileImports / FileImporters) captures all structural file relationships.
+func (p *JSLanguageProvider) FilePeers(_ context.Context, _ string) (*provider.ProviderResult[[]string], error) {
+	return &provider.ProviderResult[[]string]{Data: []string{}}, nil
+}
+
+// FileTests returns an empty result for JS/TS. Test-to-source mapping in
+// JS/TS requires Jest/Vitest config analysis which is not yet implemented.
+// Use FileImporters to find files that import the file under test.
+func (p *JSLanguageProvider) FileTests(_ context.Context, _ string) (*provider.ProviderResult[[]string], error) {
+	return &provider.ProviderResult[[]string]{Data: []string{}}, nil
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Internal helpers
 // ──────────────────────────────────────────────────────────────────────────────

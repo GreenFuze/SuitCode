@@ -214,6 +214,47 @@ func (p *CSHarpLanguageProvider) FileImporters(_ context.Context, filePath strin
 	}, nil
 }
 
+// FilePeers returns the absolute paths of all other source files in the same
+// .csproj project as filePath. These files compile into the same assembly —
+// a manifest fact, not a filesystem heuristic.
+func (p *CSHarpLanguageProvider) FilePeers(_ context.Context, filePath string) (*provider.ProviderResult[[]string], error) {
+	start := time.Now()
+
+	p.mu.RLock()
+	ready := p.ready
+	lims := copyLimitations(p.limitations)
+	var files []string
+	if ready {
+		files = p.idx.filePeers[filePath]
+	}
+	p.mu.RUnlock()
+
+	if !ready {
+		return notReadyResult[[]string](lims), nil
+	}
+
+	return &provider.ProviderResult[[]string]{
+		Data: files,
+		Provenance: []provider.Provenance{{
+			SourceKind:      provider.SourceKindManifest,
+			SourceTool:      "csproj-project-manifest",
+			Authority:       provider.AuthorityVerified,
+			EvidenceSummary: fmt.Sprintf("source files compiled in the same .csproj project as %s", filePath),
+			EvidencePaths:   []string{filePath},
+		}},
+		Limitations: lims,
+		DurationMs:  time.Since(start).Milliseconds(),
+	}, nil
+}
+
+// FileTests returns an empty result for C# — test projects are separate
+// .csproj assemblies whose relationship to the code project is expressed via
+// <ProjectReference>. Use FileImporters to find projects that reference this
+// project, then filter by test framework package presence.
+func (p *CSHarpLanguageProvider) FileTests(_ context.Context, _ string) (*provider.ProviderResult[[]string], error) {
+	return &provider.ProviderResult[[]string]{Data: []string{}}, nil
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Internal helpers
 // ──────────────────────────────────────────────────────────────────────────────

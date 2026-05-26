@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 
 	cfeatures "github.com/GreenFuze/SuitCode/core/features"
 	"github.com/GreenFuze/SuitCode/core/provider"
@@ -14,11 +13,14 @@ import (
 
 const defaultContextBudget = 8_000
 
-// Scoring constants for candidate selection. Later constants in the list are
-// only reached if no earlier rule matched (goto scored enforces exclusivity).
+// Scoring constants for context candidate ranking. All scored files are
+// included — scores only determine display order (highest-confidence first).
+// No file is excluded solely because of its score.
 const (
-	scoreImportedBy = 0.90 // file is in a package directly imported by a seed's package
-	scoreImporterOf = 0.80 // file is in a package that directly imports a seed's package
+	scoreImportedBy = 0.90 // forward import: seed imports this package
+	scoreImporterOf = 0.80 // reverse import: this package imports the seed
+	scorePeer       = 0.75 // package peer: same compilation unit as seed
+	scoreTest       = 0.70 // package test: test files for the seed's package
 )
 
 // RunContext is the ContextCompiler: it gathers candidates, scores and ranks
@@ -81,20 +83,22 @@ func RunContext(
 		seedSet[s] = true
 	}
 
-	seedDirs := make(map[string]bool)
-	for _, s := range seedRelPaths {
-		seedDirs[filepath.ToSlash(filepath.Dir(s))] = true
-	}
-
-	// ── Import-graph enrichment (optional) ────────────────────────────────────
+	// ── Import-graph enrichment ───────────────────────────────────────────────
 	//
-	// When a language provider is available, pre-compute the set of absolute
-	// file paths that are in packages directly imported by any seed (forward)
-	// and in packages that directly import any seed (reverse). These sets feed
-	// the 0.90/0.80 scoring rules below.
+	// When a language provider is available, query all four structural
+	// relationships for every seed:
+	//   importedAbsPaths — files in packages the seed directly imports (0.90)
+	//   importerAbsPaths — files in packages that directly import the seed (0.80)
+	//   peerAbsPaths     — other files in the same compilation unit (0.75)
+	//   testAbsPaths     — test files for the seed's package (0.70)
+	//
+	// All four sets are language-provider-backed — no naming heuristics.
+	// Files not covered by any of these sets are not included in the capsule.
 
 	importedAbsPaths := make(map[string]bool)
 	importerAbsPaths := make(map[string]bool)
+	peerAbsPaths := make(map[string]bool)
+	testAbsPaths := make(map[string]bool)
 	importEdgesScanned := 0
 	lspEnhanced := false
 
@@ -123,8 +127,44 @@ func RunContext(
 					lspEnhanced = true
 				}
 			}
+
+			// Peers: other files in the same compilation unit (same Go package,
+			// same C# project). Language-spec fact, not a directory heuristic.
+			if res, err := langProv.FilePeers(ctx, seedAbs); err == nil {
+				for _, p := range res.Data {
+					peerAbsPaths[p] = true
+					importEdgesScanned++
+				}
+				if len(res.Data) > 0 {
+					lspEnhanced = true
+				}
+			}
+
+			// Tests: test files for the seed's package. For Go this is the set
+			// of *_test.go files in the package directory (Go spec §10.3).
+			if res, err := langProv.FileTests(ctx, seedAbs); err == nil {
+				for _, p := range res.Data {
+					testAbsPaths[p] = true
+					importEdgesScanned++
+				}
+				if len(res.Data) > 0 {
+					lspEnhanced = true
+				}
+			}
 		}
 	}
+
+	// ── Candidate selection ───────────────────────────────────────────────────
+	//
+	// A file is a candidate if and only if it falls into one of these categories:
+	//   1.0  seed — explicitly requested
+	//   0.90 imported-by — seed's package imports this file's package
+	//   0.80 importer-of — this file's package imports the seed's package
+	//   0.75 peer — same compilation unit as seed (same Go package / C# project)
+	//   0.70 test — test file for the seed's package
+	//
+	// There are NO heuristics. Files not covered by any of the above are
+	// not included. All included files are returned — no budget trimming.
 
 	var candidates []candidate
 	seenCandidates := make(map[string]bool)
@@ -137,65 +177,29 @@ func RunContext(
 		var score float64
 		var reason string
 
-		if seedSet[f.RelPath] {
+		switch {
+		case seedSet[f.RelPath]:
 			score = 1.0
 			reason = "seed file (explicitly requested)"
-		} else {
-			dir := filepath.ToSlash(filepath.Dir(f.RelPath))
 
-			// File is in a package directly imported by a seed's package (0.90).
-			// Checked before test-file heuristic since 0.90 > 0.85.
-			if importedAbsPaths[f.Path] {
-				score = scoreImportedBy
-				reason = "file is in a package directly imported by a seed"
-				goto scored
-			}
+		case importedAbsPaths[f.Path]:
+			score = scoreImportedBy
+			reason = "file is in a package directly imported by a seed"
 
-			// Test files for seeds (0.85).
-			for _, s := range seedRelPaths {
-				tfs := testFilesForSource(listing, s)
-				for _, tf := range tfs {
-					if tf.RelPath == f.RelPath {
-						score = 0.85
-						reason = fmt.Sprintf("test file for seed %s", s)
-						goto scored
-					}
-				}
-			}
+		case importerAbsPaths[f.Path]:
+			score = scoreImporterOf
+			reason = "file is in a package that directly imports a seed"
 
-			// File's package directly imports a seed's package (0.80).
-			// Checked AFTER test-file rule (0.85 > 0.80) so a test file that
-			// also imports the seed still gets the higher test-file score.
-			if importerAbsPaths[f.Path] {
-				score = scoreImporterOf
-				reason = "file is in a package that directly imports a seed's package"
-				goto scored
-			}
+		case peerAbsPaths[f.Path]:
+			score = scorePeer
+			reason = "file is in the same compilation unit as a seed"
 
-			// Same directory as a seed.
-			if seedDirs[dir] {
-				score = 0.70
-				reason = fmt.Sprintf("same directory as seed (%s)", dir)
-				goto scored
-			}
+		case testAbsPaths[f.Path]:
+			score = scoreTest
+			reason = "test file for the seed's package"
 
-			// Similar stem to a seed file.
-			fStem := strings.ToLower(strings.TrimSuffix(filepath.Base(f.RelPath),
-				filepath.Ext(f.RelPath)))
-			for _, s := range seedRelPaths {
-				sStem := strings.ToLower(strings.TrimSuffix(filepath.Base(s),
-					filepath.Ext(s)))
-				if fStem == sStem && f.Language != "" {
-					score = 0.40
-					reason = fmt.Sprintf("similar name to seed %s", s)
-					goto scored
-				}
-			}
-		}
-
-	scored:
-		if score == 0 {
-			continue // not a candidate
+		default:
+			continue // not structurally related — excluded
 		}
 
 		est, _ := estimator.EstimateFile(f.Path)
@@ -211,17 +215,16 @@ func RunContext(
 		return candidates[i].file.RelPath < candidates[j].file.RelPath
 	})
 
-	// ── Budget selection (hard cap) ───────────────────────────────────────────
+	// ── Include all candidates ────────────────────────────────────────────────
 	//
-	// Candidates are included in rank order (highest score first). The budget is
-	// a hard cap: once tokenUsed would exceed the budget, lower-priority files
-	// are dropped and recorded as rejections so the caller knows what was left
-	// out and why.
+	// Every candidate has a structural justification from the language provider —
+	// no heuristics remain. All candidates are included in the capsule.
+	// The --budget value is used only for reporting (how much over/under budget
+	// the result is) — nothing is dropped because of it.
 	//
-	// Seed files (score=1.0) are ALWAYS included even if they alone push the
-	// capsule over budget — the caller explicitly requested them. A
-	// "seed_over_budget" limitation is emitted in that case so the caller can
-	// decide whether to raise the budget.
+	// If the total exceeds the requested budget the caller receives a
+	// "over_budget" limitation so it can decide whether to raise the budget,
+	// narrow the seed set, or proceed with the full context.
 
 	totalCandidateTokens := 0
 	for _, c := range candidates {
@@ -235,21 +238,6 @@ func RunContext(
 
 	rank := 0
 	for _, c := range candidates {
-		isSeed := c.score == 1.0
-
-		// Enforce hard budget for non-seed files: drop when adding this file
-		// would push the capsule over the budget.
-		if !isSeed && tokenUsed+c.est.Tokens > budget {
-			capsule.Rejections = append(capsule.Rejections, cfeatures.ContextRejection{
-				Candidate: cfeatures.ContextCandidate{
-					File:  fileToRef(c.file, fsProv(c.reason, c.file.Path)),
-					Score: c.score,
-				},
-				Reason: fmt.Sprintf("budget cap (%d tokens): would reach %d tokens", budget, tokenUsed+c.est.Tokens),
-			})
-			continue
-		}
-
 		// Read the file content for the capsule.
 		content, err := os.ReadFile(c.file.Path)
 		if err != nil {
@@ -285,33 +273,19 @@ func RunContext(
 			Provenance:    prov,
 			TokenEstimate: c.est,
 		})
-
-		// Warn when a seed file alone pushes the capsule over budget.
-		if isSeed && tokenUsed > budget {
-			resp.Limitations = append(resp.Limitations, provider.Limitation{
-				Kind: "seed_over_budget",
-				Message: fmt.Sprintf(
-					"seed file %q (%d tokens) alone exceeds the %d token budget; raise --budget to avoid truncation",
-					c.file.RelPath, c.est.Tokens, budget,
-				),
-				Scope: c.file.RelPath,
-			})
-		}
 	}
 
-	// Report how many files were trimmed (budget rejections only — not read errors).
-	budgetTrimmed := 0
-	for _, r := range capsule.Rejections {
-		if strings.HasPrefix(r.Reason, "budget cap") {
-			budgetTrimmed++
-		}
-	}
-	if budgetTrimmed > 0 {
+	// Report when the structurally-justified context exceeds the requested budget.
+	// This is informational — nothing was dropped; the caller may choose to
+	// narrow the seed set or raise the budget.
+	if tokenUsed > budget {
+		overage := tokenUsed - budget
+		overagePct := int(float64(overage) / float64(budget) * 100)
 		resp.Limitations = append(resp.Limitations, provider.Limitation{
-			Kind: "budget_trimmed",
+			Kind: "over_budget",
 			Message: fmt.Sprintf(
-				"%d lower-priority file(s) excluded to fit within the %d token budget; raise --budget or use --no-limit to include all",
-				budgetTrimmed, budget,
+				"structurally-related context is %d%% over requested budget: %d tokens (%d requested); all %d related files included — narrow seed set or raise --budget to reduce",
+				overagePct, tokenUsed, budget, rank,
 			),
 		})
 	}

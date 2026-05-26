@@ -213,6 +213,21 @@ func (p *PythonLanguageProvider) FileImporters(_ context.Context, filePath strin
 	}, nil
 }
 
+// FilePeers returns an empty result for Python. Python packages (directories
+// with __init__.py) do not have a compiler-enforced membership list — the
+// relationship between files in a directory is not structural in the same way
+// as Go packages or C# projects. The import graph captures actual dependencies.
+func (p *PythonLanguageProvider) FilePeers(_ context.Context, _ string) (*provider.ProviderResult[[]string], error) {
+	return &provider.ProviderResult[[]string]{Data: []string{}}, nil
+}
+
+// FileTests returns an empty result for Python. pytest test discovery is
+// naming-convention-based (test_*.py / *_test.py), not structural. Returning
+// empty avoids masquerading heuristic results as verified facts.
+func (p *PythonLanguageProvider) FileTests(_ context.Context, _ string) (*provider.ProviderResult[[]string], error) {
+	return &provider.ProviderResult[[]string]{Data: []string{}}, nil
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Internal helpers
 // ──────────────────────────────────────────────────────────────────────────────

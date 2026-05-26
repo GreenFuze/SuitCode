@@ -50,6 +50,11 @@ type csImportIndex struct {
 	// in projects that directly reference this file's project).
 	fileImporters map[string][]string
 
+	// filePeers maps abs file → sorted abs file paths of all other source files
+	// in the same .csproj project. These files compile together in the same
+	// assembly — a project-manifest fact, not a filesystem heuristic.
+	filePeers map[string][]string
+
 	// partners maps .axaml → .axaml.cs and vice-versa (Avalonia code-behind pairs).
 	partners map[string]string
 
@@ -102,6 +107,7 @@ func buildCSImportGraph(repoPath string) (*csImportIndex, []provider.Limitation,
 	idx := &csImportIndex{
 		fileImports:     make(map[string][]string),
 		fileImporters:   make(map[string][]string),
+		filePeers:       make(map[string][]string),
 		partners:        make(map[string]string),
 		filePackageRefs: make(map[string][]PackageRef),
 	}
@@ -159,6 +165,23 @@ func buildCSImportGraph(repoPath string) (*csImportIndex, []provider.Limitation,
 		for _, f := range proj.sourceFiles {
 			idx.filePackageRefs[f] = proj.packageRefs
 		}
+	}
+
+	// Step 3c: Build the filePeers map — for every source file in a project,
+	// record all other source files in the same project. These files compile into
+	// the same assembly; the relationship is established by the .csproj manifest,
+	// not by filesystem proximity.
+	for _, proj := range projects {
+		for _, fa := range proj.sourceFiles {
+			for _, fb := range proj.sourceFiles {
+				if fa != fb {
+					idx.filePeers[fa] = append(idx.filePeers[fa], fb)
+				}
+			}
+		}
+	}
+	for k := range idx.filePeers {
+		idx.filePeers[k] = dedup(idx.filePeers[k])
 	}
 
 	// Step 4: Build the bidirectional file-level graph from project-level references.

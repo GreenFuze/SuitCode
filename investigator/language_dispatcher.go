@@ -313,6 +313,23 @@ func (d *LanguageDispatcher) FileImporters(ctx context.Context, filePath string)
 	})
 }
 
+// FilePeers returns the other source files in the same compilation unit as
+// filePath (same Go package, same C# project), routed to the single provider
+// responsible for that file's extension.
+func (d *LanguageDispatcher) FilePeers(ctx context.Context, filePath string) (*provider.ProviderResult[[]string], error) {
+	return d.delegate(filePath, func(p provider.ImportGraphProvider) (*provider.ProviderResult[[]string], error) {
+		return p.FilePeers(ctx, filePath)
+	})
+}
+
+// FileTests returns the test files for the compilation unit containing
+// filePath, routed to the single provider responsible for that file's extension.
+func (d *LanguageDispatcher) FileTests(ctx context.Context, filePath string) (*provider.ProviderResult[[]string], error) {
+	return d.delegate(filePath, func(p provider.ImportGraphProvider) (*provider.ProviderResult[[]string], error) {
+		return p.FileTests(ctx, filePath)
+	})
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Internal helpers
 // ──────────────────────────────────────────────────────────────────────────────

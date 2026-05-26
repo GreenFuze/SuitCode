@@ -317,6 +317,73 @@ func (p *GoLanguageProvider) FileImporters(_ context.Context, filePath string) (
 	}, nil
 }
 
+// FilePeers returns the absolute paths of all other non-test .go source files
+// in the same Go package as filePath. These are files compiled together with
+// filePath in the same compilation unit — a language fact, not a heuristic.
+func (p *GoLanguageProvider) FilePeers(_ context.Context, filePath string) (*provider.ProviderResult[[]string], error) {
+	start := time.Now()
+
+	p.mu.RLock()
+	ready := p.ready
+	lims := append([]provider.Limitation(nil), p.limitations...)
+	var files []string
+	if ready {
+		files = p.idx.peerFiles(filePath)
+	}
+	p.mu.RUnlock()
+
+	if !ready {
+		return notReadyResult[[]string](lims), nil
+	}
+
+	return &provider.ProviderResult[[]string]{
+		Data: files,
+		Provenance: []provider.Provenance{{
+			SourceKind:      provider.SourceKindManifest,
+			SourceTool:      "golang.org/x/tools/go/packages",
+			Authority:       provider.AuthorityVerified,
+			EvidenceSummary: fmt.Sprintf("source files in the same Go package as %s", filePath),
+			EvidencePaths:   []string{filePath},
+		}},
+		Limitations: lims,
+		DurationMs:  time.Since(start).Milliseconds(),
+	}, nil
+}
+
+// FileTests returns the absolute paths of all *_test.go files in the same
+// directory as filePath. The Go specification (§10.3) mandates that test files
+// for a package must reside in the package directory — this is language spec,
+// not naming heuristic.
+func (p *GoLanguageProvider) FileTests(_ context.Context, filePath string) (*provider.ProviderResult[[]string], error) {
+	start := time.Now()
+
+	p.mu.RLock()
+	ready := p.ready
+	lims := append([]provider.Limitation(nil), p.limitations...)
+	var files []string
+	if ready {
+		files = p.idx.testFiles(filePath)
+	}
+	p.mu.RUnlock()
+
+	if !ready {
+		return notReadyResult[[]string](lims), nil
+	}
+
+	return &provider.ProviderResult[[]string]{
+		Data: files,
+		Provenance: []provider.Provenance{{
+			SourceKind:      provider.SourceKindManifest,
+			SourceTool:      "go-spec-test-convention",
+			Authority:       provider.AuthorityVerified,
+			EvidenceSummary: fmt.Sprintf("*_test.go files in the package directory of %s (Go spec §10.3)", filePath),
+			EvidencePaths:   []string{filePath},
+		}},
+		Limitations: lims,
+		DurationMs:  time.Since(start).Milliseconds(),
+	}, nil
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Internal helpers
 // ──────────────────────────────────────────────────────────────────────────────

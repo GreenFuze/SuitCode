@@ -23,6 +23,11 @@ type packageNode struct {
 	// "github.com/GreenFuze/SuitCode/core/features".
 	PkgPath string
 
+	// Dir is the absolute path to the directory containing this package.
+	// Used to locate *_test.go files (Go language spec mandates they live
+	// in the same directory as the package they test).
+	Dir string
+
 	// GoFiles holds the absolute paths of non-test .go source files.
 	GoFiles []string
 
@@ -176,8 +181,8 @@ func loadPackageGraph(ctx context.Context, repoPath string) (*packageIndex, []pr
 func loadSingleModuleGraph(ctx context.Context, moduleDir, repoPath string) (*packageIndex, []provider.Limitation, error) {
 	cfg := &packages.Config{
 		Context: ctx,
-		// NeedName: pkg.PkgPath is set.
-		// NeedFiles: pkg.GoFiles (non-test .go files) is set.
+		// NeedName: pkg.PkgPath and pkg.Name are set.
+		// NeedFiles: pkg.GoFiles (non-test .go source files) and pkg.Dir are set.
 		// NeedImports: pkg.Imports map is populated with direct imports.
 		// NeedDeps is intentionally omitted — loading ./... already gives us
 		// GoFiles for all module packages. NeedDeps would additionally load
@@ -230,6 +235,7 @@ func loadSingleModuleGraph(ctx context.Context, moduleDir, repoPath string) (*pa
 
 		node := &packageNode{
 			PkgPath:   pkg.PkgPath,
+			Dir:       pkg.Dir,
 			GoFiles:   goFiles,
 			ImportIDs: importIDs,
 		}
@@ -283,6 +289,52 @@ func buildReverseImports(byPkgPath map[string]*packageNode) map[string][]string 
 	return rev
 }
 
+// peerFiles returns the sorted absolute paths of all other non-test .go source
+// files in the same Go package as absFilePath. The file itself is excluded.
+// Returns nil when absFilePath is not indexed.
+func (idx *packageIndex) peerFiles(absFilePath string) []string {
+	node := idx.nodeForFile(absFilePath)
+	if node == nil {
+		return nil
+	}
+
+	var result []string
+	for _, f := range node.GoFiles {
+		if f != absFilePath {
+			result = append(result, f)
+		}
+	}
+	// result is already sorted because node.GoFiles is sorted at build time.
+	return result
+}
+
+// testFiles returns the sorted absolute paths of all *_test.go files that live
+// in the same directory as absFilePath. The Go spec mandates that test files
+// for a package reside in the package directory — this is spec, not heuristic.
+// Returns nil when absFilePath is not indexed or the package has no test files.
+func (idx *packageIndex) testFiles(absFilePath string) []string {
+	node := idx.nodeForFile(absFilePath)
+	if node == nil || node.Dir == "" {
+		return nil
+	}
+
+	// Read the package directory for *_test.go files. This is a single
+	// directory read — fast and authoritative (Go spec §10.3).
+	entries, err := os.ReadDir(node.Dir)
+	if err != nil {
+		return nil
+	}
+
+	var result []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), "_test.go") {
+			result = append(result, filepath.Join(node.Dir, e.Name()))
+		}
+	}
+	sort.Strings(result)
+	return result
+}
+
 // dedupStrings returns a deduplicated copy of a sorted string slice. The
 // input must already be sorted. Returns nil for empty input.
 func dedupStrings(ss []string) []string {
@@ -296,6 +348,25 @@ func dedupStrings(ss []string) []string {
 		}
 	}
 	return out
+}
+
+// nodeForFile returns the packageNode that owns absFilePath. It checks both
+// source files (byFile) and the caller's own directory scan for test files.
+// Returns nil when absFilePath is not indexed.
+func (idx *packageIndex) nodeForFile(absFilePath string) *packageNode {
+	if n := idx.byFile[absFilePath]; n != nil {
+		return n
+	}
+	// absFilePath may itself be a *_test.go file — look up by directory.
+	if strings.HasSuffix(absFilePath, "_test.go") {
+		dir := filepath.Dir(absFilePath)
+		for _, node := range idx.byFile {
+			if node.Dir == dir {
+				return node
+			}
+		}
+	}
+	return nil
 }
 
 // fileToNode returns the packageNode that owns absFilePath, or nil when the
