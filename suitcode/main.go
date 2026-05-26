@@ -58,6 +58,12 @@ USAGE:
   <repo-path> is always the first argument. It may be relative (".", "../x")
   or absolute. SuitCode never defaults to the current directory.
 
+SETUP (first time on a new machine):
+  Install the required LSP servers (gopls, csharp-ls, etc.) before warming up:
+
+    suitcode installdeps        # detect and install missing language servers
+    suitcode installdeps --yes  # non-interactive (CI / scripted setup)
+
 WORKFLOW:
   Run "warmup" once at the start of a session to load the import graph and
   start gopls. All other commands work without it, but return richer results
@@ -95,7 +101,7 @@ COMMANDS:
                      --filter <pattern>  case-insensitive substring match
 
   related          Files most related to a seed file, ranked by import-graph
-                   proximity and naming heuristics.
+                   proximity (imports, importers, peers).
                      --path <file>  [required]
 
   tests            Test files and ready-to-run test commands relevant to a
@@ -139,6 +145,11 @@ COMMANDS:
     log              Per-call detail log with seeds and limitation kinds
                      (--last N, default 100). Shows advisory vs quality issues.
     export           Package the call log as a shareable zip
+
+GLOBAL COMMANDS (no repo-path needed):
+  installdeps      Detect and install required LSP servers for each supported
+                   language. Run once on a new machine before warmup.
+                     --yes   install without prompting (CI / scripted setup)
 
 OUTPUT:
   By default every command prints a one-line summary to stdout and emits

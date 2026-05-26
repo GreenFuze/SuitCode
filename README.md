@@ -322,4 +322,31 @@ State is written to `.suitcode/` in each analyzed repo. Add it to `.gitignore`:
 
 ---
 
+## Credits & third-party software
+
+SuitCode is built on the shoulders of excellent open-source projects. Thank you to everyone who maintains them.
+
+### Go libraries
+
+| Package | Purpose | License |
+|---|---|---|
+| [go-chi/chi](https://github.com/go-chi/chi) | HTTP router for the coordinator API | MIT |
+| [spf13/cobra](https://github.com/spf13/cobra) | CLI framework for the `suitcode` client | Apache-2.0 |
+| [golang.org/x/tools](https://pkg.go.dev/golang.org/x/tools) | `go/packages` import graph + `gopls` LSP client | BSD-3-Clause |
+| [fyne.io/systray](https://github.com/fyne-io/systray) | Cross-platform system tray icon | BSD-3-Clause |
+| [modernc.org/sqlite](https://gitlab.com/cznic/sqlite) | CGo-free SQLite driver (call log storage) | BSD-3-Clause + MIT |
+| [dustin/go-humanize](https://github.com/dustin/go-humanize) | Human-readable byte sizes and numbers | MIT |
+| [google/uuid](https://github.com/google/uuid) | UUID generation for run IDs | BSD-3-Clause |
+
+### External language servers (installed via `suitcode installdeps`)
+
+| Tool | Language | Provides | License |
+|---|---|---|---|
+| [gopls](https://pkg.go.dev/golang.org/x/tools/gopls) | Go | Import graph, symbols, file references via LSP | BSD-3-Clause |
+| [csharp-ls](https://github.com/razzmatazz/csharp-language-server) | C# | File-level importers via Roslyn + LSP `textDocument/references` | MIT |
+| [typescript-language-server](https://github.com/typescript-language-server/typescript-language-server) | TypeScript/JS | Symbols and references via tsserver | Apache-2.0 |
+| [python-lsp-server (pylsp)](https://github.com/python-lsp/python-lsp-server) | Python | Symbols and references via Jedi/Rope | MIT |
+
+---
+
 *SuitCode is open source. PRs welcome.*
