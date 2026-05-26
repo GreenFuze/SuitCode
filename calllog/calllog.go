@@ -20,6 +20,20 @@ import (
 // FileName is the name of the JSONL log file inside the .suitcode directory.
 const FileName = "calls.jsonl"
 
+// advisoryLimitations is the set of limitation kinds that represent expected,
+// non-degrading advisory behaviour. They are NOT quality issues.
+//
+//   - contextual_trimmed:         Tier-2 peer/test files trimmed to fit budget
+//     (expected; tells agent the exact --budget to get everything).
+//   - critical_path_over_budget:  Tier-1 files exceeded budget but were still
+//     included — informational only.
+//   - over_budget:                advisory over-budget notice from related.go.
+var advisoryLimitations = map[string]bool{
+	"contextual_trimmed":        true,
+	"critical_path_over_budget": true,
+	"over_budget":               true,
+}
+
 // Record is one feature-call entry in the call log.
 // All path fields are relative to the repository root.
 // Privacy invariant: never include file content, absolute paths, or user-identifiable data.
@@ -45,6 +59,12 @@ type Record struct {
 	// A non-zero value means the answer is degraded in some way (missing
 	// import graph, heuristic fallbacks, unresolved files, etc.).
 	LimitationCount int `json:"limitation_count,omitempty"`
+
+	// LimitationKinds lists the Kind of each Limitation in the response.
+	// Use this to distinguish advisory limitations (expected, e.g. "contextual_trimmed")
+	// from quality degradations (e.g. "no_lang_provider", "file_not_found").
+	// Populated alongside LimitationCount; nil on older records.
+	LimitationKinds []string `json:"limitation_kinds,omitempty"`
 }
 
 // Logger appends Records to <repoPath>/.suitcode/calls.jsonl.
@@ -183,7 +203,82 @@ func (l *Logger) PrintSummary(w io.Writer, last int) error {
 		)
 	}
 
-	fmt.Fprintf(w, "\n%d records  ·  %s\n", len(records), l.path)
+	fmt.Fprintf(w, "\n%d records  |  %s\n", len(records), l.path)
+	return nil
+}
+
+// PrintCallLog writes a detailed per-call log to w, including seed files and
+// limitation kinds. Pass last = 0 to show all records.
+func (l *Logger) PrintCallLog(w io.Writer, last int) error {
+	records, err := l.LoadAll()
+	if err != nil {
+		return err
+	}
+	if len(records) == 0 {
+		fmt.Fprintln(w, "No call records found in", l.path)
+		return nil
+	}
+
+	// Trim to last N if requested.
+	if last > 0 && len(records) > last {
+		records = records[len(records)-last:]
+	}
+
+	// Header.
+	fmt.Fprintf(w, "%-5s  %-17s  %-16s  %-26s  %-11s  %-8s  %s\n",
+		"#", "time", "feature", "seeds", "tok/budget", "latency", "limitations")
+	fmt.Fprintln(w, strings.Repeat("-", 105))
+
+	for i, r := range records {
+		// Format timestamp.
+		ts := r.TS
+		if t, parseErr := time.Parse(time.RFC3339, r.TS); parseErr == nil {
+			ts = t.Local().Format("01-02 15:04:05")
+		}
+
+		// Format seeds column: first seed basename + "+N" overflow indicator.
+		seedsCol := "-"
+		if len(r.SeedFiles) > 0 {
+			seedsCol = filepath.Base(r.SeedFiles[0])
+			if len(r.SeedFiles) > 1 {
+				seedsCol += fmt.Sprintf("+%d", len(r.SeedFiles)-1)
+			}
+		}
+
+		// Format token budget column.
+		budgetCol := "-"
+		if r.BudgetRequested > 0 {
+			budgetCol = fmt.Sprintf("%d/%d", r.BudgetUsed, r.BudgetRequested)
+		} else if r.BudgetUsed > 0 {
+			budgetCol = fmt.Sprintf("%d", r.BudgetUsed)
+		}
+
+		latencyCol := fmt.Sprintf("%dms", r.LatencyMs)
+
+		// Format limitations column.
+		limCol := "-"
+		switch {
+		case r.HasError:
+			limCol = "ERROR"
+		case len(r.LimitationKinds) > 0:
+			limCol = strings.Join(r.LimitationKinds, ", ")
+		case r.LimitationCount > 0:
+			// Older record without LimitationKinds — show count only.
+			limCol = fmt.Sprintf("%d limitation(s)", r.LimitationCount)
+		}
+
+		fmt.Fprintf(w, "%-5d  %-17s  %-16s  %-26s  %-11s  %-8s  %s\n",
+			i+1,
+			ts,
+			truncate(r.Feature, 16),
+			truncate(seedsCol, 26),
+			budgetCol,
+			latencyCol,
+			limCol,
+		)
+	}
+
+	fmt.Fprintf(w, "\n%d records  |  %s\n", len(records), l.path)
 	return nil
 }
 
@@ -235,20 +330,21 @@ func (l *Logger) Export(outputPath string) error {
 
 // featureStat accumulates metrics for one feature across a set of records.
 type featureStat struct {
-	calls       int
-	errors      int   // calls where HasError == true
-	warnings    int   // calls where LimitationCount > 0 (degraded response)
-	totalMs     int64
-	totalTok    int64 // sum of BudgetUsed (for calls with BudgetUsed > 0)
-	tokCalls    int   // number of calls that had BudgetUsed > 0
-	ratioSum    float64 // sum of (1/CompressionRatio) for calls with CandidatesTotal > 0
-	ratioCalls  int   // number of calls that had a compression ratio
+	calls      int
+	errors     int   // calls where HasError == true
+	warnings   int   // calls where LimitationCount > 0 (any limitation)
+	totalMs    int64
+	totalTok   int64   // sum of BudgetUsed (for calls with BudgetUsed > 0)
+	tokCalls   int     // number of calls that had BudgetUsed > 0
+	ratioSum   float64 // sum of (1/CompressionRatio) for calls with CandidatesTotal > 0
+	ratioCalls int     // number of calls that had a compression ratio
 }
 
 // PrintAggregateSummary writes a condensed, human-readable session summary to w.
 // It aggregates the most recent 'last' records (0 = all) by feature and prints
 // per-feature stats plus a problems section. Output is designed to be
-// copy-pasteable in ~15 lines.
+// copy-pasteable in ~15 lines. Uses ASCII-only characters for Windows clipboard
+// compatibility.
 func (l *Logger) PrintAggregateSummary(w io.Writer, last int) error {
 	records, err := l.LoadAll()
 	if err != nil {
@@ -284,6 +380,11 @@ func (l *Logger) PrintAggregateSummary(w io.Writer, last int) error {
 	orderSeen := make([]string, 0, 8)
 	statMap := make(map[string]*featureStat, 8)
 
+	// Global limitation kind counts (across all features, in insertion order).
+	globalKindOrder := make([]string, 0, 8)
+	globalKindCounts := make(map[string]int, 8)
+	globalKindSeen := make(map[string]bool, 8)
+
 	for _, r := range records {
 		if _, exists := statMap[r.Feature]; !exists {
 			orderSeen = append(orderSeen, r.Feature)
@@ -306,6 +407,15 @@ func (l *Logger) PrintAggregateSummary(w io.Writer, last int) error {
 			s.ratioSum += 1.0 / r.CompressionRatio
 			s.ratioCalls++
 		}
+
+		// Accumulate per-kind counts globally.
+		for _, k := range r.LimitationKinds {
+			if !globalKindSeen[k] {
+				globalKindOrder = append(globalKindOrder, k)
+				globalKindSeen[k] = true
+			}
+			globalKindCounts[k]++
+		}
 	}
 
 	// Compute totals.
@@ -321,18 +431,19 @@ func (l *Logger) PrintAggregateSummary(w io.Writer, last int) error {
 		totals.ratioCalls += s.ratioCalls
 	}
 
-	const bar = "══════════════════════════════════════════════════════════════"
-	const div = "──────────────────────────────────────────────────────────────"
+	// ASCII-only separators for Windows clipboard compatibility.
+	const bar = "=============================================================="
+	const div = "--------------------------------------------------------------"
 
 	// Header.
 	fmt.Fprintln(w, bar)
 	fmt.Fprintln(w, "  SuitCode Call Summary")
 	fmt.Fprintln(w, bar)
 
-	// Period line.
+	// Period line (ASCII only: "-" instead of en-dash, "|" instead of middle-dot).
 	if !firstTS.IsZero() {
 		span := lastTS.Sub(firstTS).Round(time.Minute)
-		fmt.Fprintf(w, "  period   %s – %s  (%s · %d calls)\n",
+		fmt.Fprintf(w, "  period   %s - %s  (%s | %d calls)\n",
 			firstTS.Format("2006-01-02 15:04"),
 			lastTS.Format("15:04"),
 			formatDuration(span),
@@ -355,20 +466,45 @@ func (l *Logger) PrintAggregateSummary(w io.Writer, last int) error {
 	fmt.Fprintln(w, " "+div)
 	printStatRow(w, "totals", totals)
 
-	// Problems section — only shown when there are errors or warnings.
+	// Problems section.
 	if totals.errors > 0 || totals.warnings > 0 {
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "  problems:")
+
+		// Errors by feature.
 		for _, name := range orderSeen {
 			s := statMap[name]
 			if s.errors > 0 {
-				fmt.Fprintf(w, "    %d error(s)   in %-18s — call failed to complete\n", s.errors, name)
+				fmt.Fprintf(w, "    errors    %dx in %s -- call failed to complete\n", s.errors, name)
 			}
 		}
-		for _, name := range orderSeen {
-			s := statMap[name]
-			if s.warnings > 0 {
-				fmt.Fprintf(w, "    %d warning(s) in %-18s — response had limitations (degraded quality)\n", s.warnings, name)
+
+		// Limitation kinds: split advisory from quality.
+		var advisoryParts, qualityParts []string
+		for _, k := range globalKindOrder {
+			cnt := globalKindCounts[k]
+			part := fmt.Sprintf("%dx %s", cnt, k)
+			if advisoryLimitations[k] {
+				advisoryParts = append(advisoryParts, part)
+			} else {
+				qualityParts = append(qualityParts, part)
+			}
+		}
+
+		if len(advisoryParts) > 0 {
+			fmt.Fprintf(w, "    advisory  %s\n", strings.Join(advisoryParts, ", "))
+		}
+		if len(qualityParts) > 0 {
+			fmt.Fprintf(w, "    quality   %s\n", strings.Join(qualityParts, ", "))
+		}
+
+		// Fallback for older records without LimitationKinds.
+		if len(advisoryParts) == 0 && len(qualityParts) == 0 && totals.warnings > 0 {
+			for _, name := range orderSeen {
+				s := statMap[name]
+				if s.warnings > 0 {
+					fmt.Fprintf(w, "    %dx warnings in %-18s -- response had limitations\n", s.warnings, name)
+				}
 			}
 		}
 	}
@@ -391,9 +527,10 @@ func printStatRow(w io.Writer, label string, s *featureStat) {
 		avgTok = formatThousands(int(s.totalTok / int64(s.tokCalls)))
 	}
 
+	// ASCII "x" instead of Unicode multiplication sign.
 	avgRatio := "-"
 	if s.ratioCalls > 0 {
-		avgRatio = fmt.Sprintf("%.1f×", s.ratioSum/float64(s.ratioCalls))
+		avgRatio = fmt.Sprintf("%.1fx", s.ratioSum/float64(s.ratioCalls))
 	}
 
 	fmt.Fprintf(w, "  %-18s  %5d  %5d  %5d  %7s  %8s  %7s\n",
@@ -434,11 +571,15 @@ func formatThousands(n int) string {
 
 // ──────────────────────────────────────────────────────────────────────────────
 
-// truncate shortens s to at most n runes, appending "…" if truncated.
+// truncate shortens s to at most n runes, appending "..." if truncated.
+// Uses ASCII ellipsis for Windows clipboard compatibility.
 func truncate(s string, n int) string {
 	runes := []rune(s)
 	if len(runes) <= n {
 		return s
 	}
-	return string(runes[:n-1]) + "…"
+	if n <= 3 {
+		return string(runes[:n])
+	}
+	return string(runes[:n-3]) + "..."
 }

@@ -321,8 +321,9 @@ func (inv *ProjectInvestigator) Status() InvestigatorStatus {
 //
 // Every method uses named return values + a deferred calllog write so that
 // failures are recorded alongside successes. HasError is set when the call
-// returns a non-nil error. LimitationCount captures quality degradations (e.g.
-// heuristic fallbacks, unresolved import graphs) even on successful responses.
+// returns a non-nil error. LimitationCount/LimitationKinds capture quality
+// degradations (e.g. heuristic fallbacks, unresolved import graphs) even on
+// successful responses.
 // ──────────────────────────────────────────────────────────────────────────────
 
 func (inv *ProjectInvestigator) RepoOverview(ctx context.Context, req cfeatures.RepoOverviewRequest) (resp *cfeatures.RepoOverviewResponse, retErr error) {
@@ -332,7 +333,8 @@ func (inv *ProjectInvestigator) RepoOverview(ctx context.Context, req cfeatures.
 		if resp != nil {
 			rec.BudgetUsed      = resp.Metrics.Budget.Used
 			rec.LatencyMs       = resp.Metrics.Timing.DurationMs
-			rec.LimitationCount = len(resp.BaseFeatureResponse.Limitations)
+			rec.LimitationCount  = len(resp.BaseFeatureResponse.Limitations)
+			rec.LimitationKinds  = limitationKinds(resp.BaseFeatureResponse.Limitations)
 		}
 		inv.appendCall(rec)
 	}()
@@ -355,7 +357,8 @@ func (inv *ProjectInvestigator) ExplainFile(ctx context.Context, req cfeatures.E
 		if resp != nil {
 			rec.BudgetUsed      = resp.Metrics.Budget.Used
 			rec.LatencyMs       = resp.Metrics.Timing.DurationMs
-			rec.LimitationCount = len(resp.BaseFeatureResponse.Limitations)
+			rec.LimitationCount  = len(resp.BaseFeatureResponse.Limitations)
+			rec.LimitationKinds  = limitationKinds(resp.BaseFeatureResponse.Limitations)
 		}
 		inv.appendCall(rec)
 	}()
@@ -395,7 +398,8 @@ func (inv *ProjectInvestigator) Related(ctx context.Context, req cfeatures.Relat
 		if resp != nil {
 			rec.BudgetUsed      = resp.Metrics.Budget.Used
 			rec.LatencyMs       = resp.Metrics.Timing.DurationMs
-			rec.LimitationCount = len(resp.BaseFeatureResponse.Limitations)
+			rec.LimitationCount  = len(resp.BaseFeatureResponse.Limitations)
+			rec.LimitationKinds  = limitationKinds(resp.BaseFeatureResponse.Limitations)
 		}
 		inv.appendCall(rec)
 	}()
@@ -418,7 +422,8 @@ func (inv *ProjectInvestigator) Tests(ctx context.Context, req cfeatures.TestsRe
 		if resp != nil {
 			rec.BudgetUsed      = resp.Metrics.Budget.Used
 			rec.LatencyMs       = resp.Metrics.Timing.DurationMs
-			rec.LimitationCount = len(resp.BaseFeatureResponse.Limitations)
+			rec.LimitationCount  = len(resp.BaseFeatureResponse.Limitations)
+			rec.LimitationKinds  = limitationKinds(resp.BaseFeatureResponse.Limitations)
 		}
 		inv.appendCall(rec)
 	}()
@@ -441,7 +446,8 @@ func (inv *ProjectInvestigator) Impact(ctx context.Context, req cfeatures.Impact
 		if resp != nil {
 			rec.BudgetUsed      = resp.Metrics.Budget.Used
 			rec.LatencyMs       = resp.Metrics.Timing.DurationMs
-			rec.LimitationCount = len(resp.BaseFeatureResponse.Limitations)
+			rec.LimitationCount  = len(resp.BaseFeatureResponse.Limitations)
+			rec.LimitationKinds  = limitationKinds(resp.BaseFeatureResponse.Limitations)
 		}
 		inv.appendCall(rec)
 	}()
@@ -481,6 +487,7 @@ func (inv *ProjectInvestigator) Context(ctx context.Context, req cfeatures.Conte
 			rec.ImportEdgesScanned = resp.Metrics.ContextReduction.ImportEdgesScanned
 			rec.LspEnhanced        = resp.Metrics.ContextReduction.LspEnhanced
 			rec.LimitationCount    = len(resp.BaseFeatureResponse.Limitations)
+			rec.LimitationKinds    = limitationKinds(resp.BaseFeatureResponse.Limitations)
 		}
 		inv.appendCall(rec)
 	}()
@@ -499,7 +506,8 @@ func (inv *ProjectInvestigator) FailureContext(ctx context.Context, req cfeature
 		if resp != nil {
 			rec.BudgetUsed      = resp.Metrics.Budget.Used
 			rec.LatencyMs       = resp.Metrics.Timing.DurationMs
-			rec.LimitationCount = len(resp.BaseFeatureResponse.Limitations)
+			rec.LimitationCount  = len(resp.BaseFeatureResponse.Limitations)
+			rec.LimitationKinds  = limitationKinds(resp.BaseFeatureResponse.Limitations)
 		}
 		inv.appendCall(rec)
 	}()
@@ -522,7 +530,8 @@ func (inv *ProjectInvestigator) VerifyPlan(ctx context.Context, req cfeatures.Ve
 		if resp != nil {
 			rec.BudgetUsed      = resp.Metrics.Budget.Used
 			rec.LatencyMs       = resp.Metrics.Timing.DurationMs
-			rec.LimitationCount = len(resp.BaseFeatureResponse.Limitations)
+			rec.LimitationCount  = len(resp.BaseFeatureResponse.Limitations)
+			rec.LimitationKinds  = limitationKinds(resp.BaseFeatureResponse.Limitations)
 		}
 		inv.appendCall(rec)
 	}()
@@ -605,6 +614,20 @@ func (inv *ProjectInvestigator) appendCall(r calllog.Record) {
 	if err := inv.callLogger.Append(r); err != nil {
 		logf("warn: calllog: %v", err)
 	}
+}
+
+// limitationKinds extracts the Kind string from each Limitation.
+// Returns nil (not empty slice) when there are no limitations, which omits
+// the field from JSONL output on older records.
+func limitationKinds(lims []provider.Limitation) []string {
+	if len(lims) == 0 {
+		return nil
+	}
+	kinds := make([]string, len(lims))
+	for i, l := range lims {
+		kinds[i] = l.Kind
+	}
+	return kinds
 }
 
 // relPaths converts a slice of potentially-absolute paths to paths relative to

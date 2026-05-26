@@ -120,6 +120,8 @@ COMMANDS:
                      this to transfer analytics across air-gapped machines.
                        --last N   limit to the most recent N records (0 = all)
     show             Per-call table of recent calls (--last N, default 50)
+    log              Per-call detail log with seeds and limitation kinds
+                     (--last N, default 100). Shows advisory vs quality issues.
     export           Package the call log as a shareable zip
 
 OUTPUT:
@@ -1020,6 +1022,7 @@ func newMetricsCmd(repoPath string) *cobra.Command {
 	}
 	metricsCmd.AddCommand(newMetricsSummaryCmd(repoPath))
 	metricsCmd.AddCommand(newMetricsShowCmd(repoPath))
+	metricsCmd.AddCommand(newMetricsLogCmd(repoPath))
 	metricsCmd.AddCommand(newMetricsExportCmd(repoPath))
 	return metricsCmd
 }
@@ -1077,6 +1080,33 @@ func newMetricsShowCmd(repoPath string) *cobra.Command {
 	}
 
 	cmd.Flags().IntVar(&last, "last", 50, "number of most recent records to show (0 = all)")
+	return cmd
+}
+
+func newMetricsLogCmd(repoPath string) *cobra.Command {
+	var last int
+
+	cmd := &cobra.Command{
+		Use:   "log",
+		Short: "Print a per-call detail log with seeds and limitation kinds",
+		Long: `Prints one row per feature call, showing seeds, token budget, latency,
+and the specific limitation kinds returned (if any).
+
+Limitation kinds are split into two categories:
+  advisory  — expected behaviour (e.g. contextual_trimmed, critical_path_over_budget)
+  quality   — real quality degradations (e.g. no_lang_provider, file_not_found)
+
+Use this view to audit individual calls and diagnose recurring quality issues.`,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			clog, err := calllog.New(repoPath)
+			if err != nil {
+				return fmt.Errorf("metrics log: %w", err)
+			}
+			return clog.PrintCallLog(os.Stdout, last)
+		},
+	}
+
+	cmd.Flags().IntVar(&last, "last", 100, "number of most recent records to show (0 = all)")
 	return cmd
 }
 
