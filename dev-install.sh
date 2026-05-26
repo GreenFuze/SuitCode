@@ -73,6 +73,7 @@ echo ""
 
 if [ "$RESTART" -eq 1 ]; then
   echo "Restarting coordinator..."
+  pkill -x suitcode    2>/dev/null || true
   pkill -x coordinator 2>/dev/null || true
   pkill -x investigator 2>/dev/null || true
   sleep 0.5
