@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -1245,6 +1246,21 @@ var knownFormatNames = map[string]bool{"json": true, "markdown": true, "md": tru
 // into ConvertFrom-Json: write to a file and read it back instead.
 func writeJSON(v any) error {
 	out := os.Stdout
+
+	// On Windows, piping JSON through PowerShell triggers "pipe being closed"
+	// errors for large payloads. Detect this early and advise --output.
+	if outputFile == "" && runtime.GOOS == "windows" {
+		if stat, err := os.Stdout.Stat(); err == nil {
+			if stat.Mode()&os.ModeNamedPipe != 0 {
+				fmt.Fprintln(os.Stderr,
+					"warn: stdout is a pipe — PowerShell may truncate large JSON responses.\n"+
+						"  Use --output <file> to avoid this:\n"+
+						"    suitcode . context --files foo.go --format json --output result.json\n"+
+						"    $r = Get-Content result.json | ConvertFrom-Json")
+			}
+		}
+	}
+
 	if outputFile != "" {
 		// Warn when --output looks like a format name — a common mistake is
 		// writing "--output json" when "--format json" was intended.

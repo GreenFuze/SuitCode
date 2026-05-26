@@ -169,6 +169,7 @@ type projectSlot struct {
 	mCopyCall        *systray.MenuItem // sub-item: "Copy Call Log"
 	mAnalyzeSession  *systray.MenuItem // sub-item: "Analyze Last Session"
 	mCopyAnalysis    *systray.MenuItem // sub-item: "Copy Analysis Pack"
+	mCopyPackPath    *systray.MenuItem // sub-item: "Copy Pack Path"
 	mOpenDir         *systray.MenuItem // sub-item: "Open Project Folder"
 	mStop            *systray.MenuItem // sub-item: "Stop Investigator"
 
@@ -209,6 +210,7 @@ func (m *trayMenu) build() {
 		mCopyCall       := mParent.AddSubMenuItem("Copy Call Log", "Copy the per-call detail log with seeds and limitation kinds to the clipboard")
 		mAnalyzeSession := mParent.AddSubMenuItem("Analyze Last Session", "Parse the most recent Claude Code session and compute heuristic quality signals")
 		mCopyAnalysis   := mParent.AddSubMenuItem("Copy Analysis Pack", "Copy the session analysis pack to clipboard for LLM review (shows privacy notice)")
+		mCopyPackPath   := mParent.AddSubMenuItem("Copy Pack Path", "Copy the analysis pack file path to clipboard — for local agents that can read files directly")
 		mOpenDir        := mParent.AddSubMenuItem("Open Project Folder", "Open the project directory in the system file manager")
 		mStop           := mParent.AddSubMenuItem("Stop Investigator", "Terminate the investigator process for this project")
 
@@ -222,6 +224,7 @@ func (m *trayMenu) build() {
 			mCopyCall:       mCopyCall,
 			mAnalyzeSession: mAnalyzeSession,
 			mCopyAnalysis:   mCopyAnalysis,
+			mCopyPackPath:   mCopyPackPath,
 			mOpenDir:        mOpenDir,
 			mStop:           mStop,
 		}
@@ -307,6 +310,12 @@ func (m *trayMenu) runSlotHandler(s *projectSlot) {
 				return
 			}
 			m.handleCopyAnalysisPack(s)
+
+		case _, ok := <-s.mCopyPackPath.ClickedCh:
+			if !ok {
+				return
+			}
+			m.handleCopyAnalysisPackPath(s)
 
 		case _, ok := <-s.mOpenDir.ClickedCh:
 			if !ok {
@@ -546,6 +555,37 @@ func (m *trayMenu) handleCopyAnalysisPack(s *projectSlot) {
 	}
 
 	logf("tray: analysis pack copied to clipboard from %s", filepath.Base(path))
+}
+
+// handleCopyAnalysisPackPath copies only the file path of the most recently
+// saved analysis pack to the clipboard. No privacy disclaimer is needed — the
+// path itself contains no conversation content. Intended for local Claude Code
+// agents that can read the file directly via the Read tool.
+func (m *trayMenu) handleCopyAnalysisPackPath(s *projectSlot) {
+	s.mu.Lock()
+	info := s.projectInfo
+	s.mu.Unlock()
+
+	if info.ProjectPath == "" {
+		return
+	}
+
+	path, err := sessionanalysis.FindLatestAnalysisPack(info.ProjectPath)
+	if err != nil {
+		logf("tray: copy pack path: %v", err)
+		return
+	}
+	if path == "" {
+		logf("tray: copy pack path: no pack found — run 'Analyze Last Session' first")
+		return
+	}
+
+	if err := copyToClipboard(path); err != nil {
+		logf("tray: copy pack path: clipboard: %v", err)
+		return
+	}
+
+	logf("tray: analysis pack path copied to clipboard: %s", path)
 }
 
 // showPrivacyDisclaimer presents a modal OK/Cancel dialog explaining that the
