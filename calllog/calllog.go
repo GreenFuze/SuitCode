@@ -65,6 +65,14 @@ type Record struct {
 	// from quality degradations (e.g. "no_lang_provider", "file_not_found").
 	// Populated alongside LimitationCount; nil on older records.
 	LimitationKinds []string `json:"limitation_kinds,omitempty"`
+
+	// Feedback records whether the agent found the response helpful.
+	// Set via "suitcode <path> feedback good|bad".
+	// Empty when no feedback has been given for this call.
+	Feedback string `json:"feedback,omitempty"`
+
+	// FeedbackAt is the RFC3339 timestamp when feedback was recorded.
+	FeedbackAt string `json:"feedback_at,omitempty"`
 }
 
 // Logger appends Records to <repoPath>/.suitcode/calls.jsonl.
@@ -114,7 +122,12 @@ func (l *Logger) Append(r Record) error {
 func (l *Logger) LoadAll() ([]Record, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	return l.loadAllLocked()
+}
 
+// loadAllLocked reads all records without acquiring the mutex.
+// Caller must hold l.mu.
+func (l *Logger) loadAllLocked() ([]Record, error) {
 	f, err := os.Open(l.path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -141,6 +154,73 @@ func (l *Logger) LoadAll() ([]Record, error) {
 		return nil, fmt.Errorf("calllog: read %q: %w", l.path, err)
 	}
 	return records, nil
+}
+
+// rewriteLocked atomically rewrites the entire JSONL file with the given records.
+// Uses a temp-file + rename strategy so that partial writes never corrupt the log.
+// Caller must hold l.mu.
+func (l *Logger) rewriteLocked(records []Record) error {
+	dir := filepath.Dir(l.path)
+	tmp, err := os.CreateTemp(dir, "calls-*.jsonl.tmp")
+	if err != nil {
+		return fmt.Errorf("calllog: create temp: %w", err)
+	}
+	tmpName := tmp.Name()
+
+	w := bufio.NewWriter(tmp)
+	for _, r := range records {
+		data, merr := json.Marshal(r)
+		if merr != nil {
+			tmp.Close()
+			os.Remove(tmpName)
+			return fmt.Errorf("calllog: marshal: %w", merr)
+		}
+		if _, werr := fmt.Fprintf(w, "%s\n", data); werr != nil {
+			tmp.Close()
+			os.Remove(tmpName)
+			return fmt.Errorf("calllog: write temp: %w", werr)
+		}
+	}
+
+	if err := w.Flush(); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return fmt.Errorf("calllog: flush temp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return fmt.Errorf("calllog: close temp: %w", err)
+	}
+
+	// Atomic replace — survives crashes between write and rename.
+	if err := os.Rename(tmpName, l.path); err != nil {
+		os.Remove(tmpName)
+		return fmt.Errorf("calllog: rename temp to %q: %w", l.path, err)
+	}
+	return nil
+}
+
+// SetLastFeedback updates the most recent call record with the given feedback
+// value ("good" or "bad") and records the timestamp. It reads all records,
+// patches the last one, and atomically rewrites the file.
+// Returns an error when no records exist yet.
+func (l *Logger) SetLastFeedback(feedback string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	records, err := l.loadAllLocked()
+	if err != nil {
+		return err
+	}
+	if len(records) == 0 {
+		return fmt.Errorf("calllog: no records to apply feedback to")
+	}
+
+	// Patch the last record.
+	records[len(records)-1].Feedback = feedback
+	records[len(records)-1].FeedbackAt = time.Now().UTC().Format(time.RFC3339)
+
+	return l.rewriteLocked(records)
 }
 
 // Path returns the absolute path to the JSONL file.
@@ -330,14 +410,16 @@ func (l *Logger) Export(outputPath string) error {
 
 // featureStat accumulates metrics for one feature across a set of records.
 type featureStat struct {
-	calls      int
-	errors     int   // calls where HasError == true
-	warnings   int   // calls where LimitationCount > 0 (any limitation)
-	totalMs    int64
-	totalTok   int64   // sum of BudgetUsed (for calls with BudgetUsed > 0)
-	tokCalls   int     // number of calls that had BudgetUsed > 0
-	ratioSum   float64 // sum of (1/CompressionRatio) for calls with CandidatesTotal > 0
-	ratioCalls int     // number of calls that had a compression ratio
+	calls        int
+	errors       int     // calls where HasError == true
+	warnings     int     // calls where LimitationCount > 0 (any limitation)
+	totalMs      int64
+	totalTok     int64   // sum of BudgetUsed (for calls with BudgetUsed > 0)
+	tokCalls     int     // number of calls that had BudgetUsed > 0
+	ratioSum     float64 // sum of (1/CompressionRatio) for calls with CandidatesTotal > 0
+	ratioCalls   int     // number of calls that had a compression ratio
+	feedbackGood int     // calls rated "good"
+	feedbackBad  int     // calls rated "bad"
 }
 
 // PrintAggregateSummary writes a condensed, human-readable session summary to w.
@@ -416,6 +498,14 @@ func (l *Logger) PrintAggregateSummary(w io.Writer, last int) error {
 			}
 			globalKindCounts[k]++
 		}
+
+		// Accumulate feedback.
+		switch r.Feedback {
+		case "good":
+			s.feedbackGood++
+		case "bad":
+			s.feedbackBad++
+		}
 	}
 
 	// Compute totals.
@@ -429,6 +519,8 @@ func (l *Logger) PrintAggregateSummary(w io.Writer, last int) error {
 		totals.tokCalls += s.tokCalls
 		totals.ratioSum += s.ratioSum
 		totals.ratioCalls += s.ratioCalls
+		totals.feedbackGood += s.feedbackGood
+		totals.feedbackBad += s.feedbackBad
 	}
 
 	// ASCII-only separators for Windows clipboard compatibility.
@@ -507,6 +599,15 @@ func (l *Logger) PrintAggregateSummary(w io.Writer, last int) error {
 				}
 			}
 		}
+	}
+
+	// Feedback section — shown only when at least one call has been rated.
+	totalFeedback := totals.feedbackGood + totals.feedbackBad
+	if totalFeedback > 0 {
+		fmt.Fprintln(w)
+		helpRate := int(float64(totals.feedbackGood) / float64(totalFeedback) * 100)
+		fmt.Fprintf(w, "  feedback: %d call(s) rated (%d good, %d bad) — %d%% helpful\n",
+			totalFeedback, totals.feedbackGood, totals.feedbackBad, helpRate)
 	}
 
 	fmt.Fprintln(w, bar)

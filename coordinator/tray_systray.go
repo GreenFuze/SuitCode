@@ -23,6 +23,7 @@ import (
 	"fyne.io/systray"
 	"github.com/GreenFuze/SuitCode/calllog"
 	coord "github.com/GreenFuze/SuitCode/core/coordinator"
+	"github.com/GreenFuze/SuitCode/sessionanalysis"
 )
 
 //go:embed assets/icon.png
@@ -162,15 +163,17 @@ type trayMenu struct {
 // root HMENU), then call mParent.Hide(). The child HMENU is already attached
 // and survives Hide/Show cycles correctly thereafter.
 type projectSlot struct {
-	mParent   *systray.MenuItem // top-level sub-menu trigger; title = project path
-	mCopyLog  *systray.MenuItem // sub-item: "Copy Coordinator Log"
-	mCopyMet  *systray.MenuItem // sub-item: "Copy Metrics Summary"
-	mCopyCall *systray.MenuItem // sub-item: "Copy Call Log"
-	mOpenDir  *systray.MenuItem // sub-item: "Open Project Folder"
-	mStop     *systray.MenuItem // sub-item: "Stop Investigator"
+	mParent          *systray.MenuItem // top-level sub-menu trigger; title = project path
+	mCopyLog         *systray.MenuItem // sub-item: "Copy Coordinator Log"
+	mCopyMet         *systray.MenuItem // sub-item: "Copy Metrics Summary"
+	mCopyCall        *systray.MenuItem // sub-item: "Copy Call Log"
+	mAnalyzeSession  *systray.MenuItem // sub-item: "Analyze Last Session"
+	mCopyAnalysis    *systray.MenuItem // sub-item: "Copy Analysis Pack"
+	mOpenDir         *systray.MenuItem // sub-item: "Open Project Folder"
+	mStop            *systray.MenuItem // sub-item: "Stop Investigator"
 
 	mu          sync.Mutex
-	projectPath string          // empty when slot is hidden
+	projectPath string           // empty when slot is hidden
 	projectInfo coord.ProjectInfo // last polled state
 }
 
@@ -201,22 +204,26 @@ func (m *trayMenu) build() {
 
 		// Add sub-items while mParent is in the root HMENU — this is what
 		// makes convertToSubMenu's SetMenuItemInfo call succeed on Windows.
-		mCopyLog  := mParent.AddSubMenuItem("Copy Coordinator Log", "Copy the coordinator log file to the clipboard")
-		mCopyMet  := mParent.AddSubMenuItem("Copy Metrics Summary", "Copy the condensed session summary (errors, warnings, latency) to the clipboard")
-		mCopyCall := mParent.AddSubMenuItem("Copy Call Log", "Copy the per-call detail log with seeds and limitation kinds to the clipboard")
-		mOpenDir  := mParent.AddSubMenuItem("Open Project Folder", "Open the project directory in the system file manager")
-		mStop     := mParent.AddSubMenuItem("Stop Investigator", "Terminate the investigator process for this project")
+		mCopyLog        := mParent.AddSubMenuItem("Copy Coordinator Log", "Copy the coordinator log file to the clipboard")
+		mCopyMet        := mParent.AddSubMenuItem("Copy Metrics Summary", "Copy the condensed session summary (errors, warnings, latency) to the clipboard")
+		mCopyCall       := mParent.AddSubMenuItem("Copy Call Log", "Copy the per-call detail log with seeds and limitation kinds to the clipboard")
+		mAnalyzeSession := mParent.AddSubMenuItem("Analyze Last Session", "Parse the most recent Claude Code session and compute heuristic quality signals")
+		mCopyAnalysis   := mParent.AddSubMenuItem("Copy Analysis Pack", "Copy the session analysis pack to clipboard for LLM review (shows privacy notice)")
+		mOpenDir        := mParent.AddSubMenuItem("Open Project Folder", "Open the project directory in the system file manager")
+		mStop           := mParent.AddSubMenuItem("Stop Investigator", "Terminate the investigator process for this project")
 
 		// Hide AFTER sub-items are attached so the child HMENU is wired up.
 		mParent.Hide()
 
 		s := &projectSlot{
-			mParent:   mParent,
-			mCopyLog:  mCopyLog,
-			mCopyMet:  mCopyMet,
-			mCopyCall: mCopyCall,
-			mOpenDir:  mOpenDir,
-			mStop:     mStop,
+			mParent:         mParent,
+			mCopyLog:        mCopyLog,
+			mCopyMet:        mCopyMet,
+			mCopyCall:       mCopyCall,
+			mAnalyzeSession: mAnalyzeSession,
+			mCopyAnalysis:   mCopyAnalysis,
+			mOpenDir:        mOpenDir,
+			mStop:           mStop,
 		}
 		m.slots[i] = s
 		go m.runSlotHandler(s)
@@ -288,6 +295,18 @@ func (m *trayMenu) runSlotHandler(s *projectSlot) {
 				return
 			}
 			m.handleCopyCallLog(s)
+
+		case _, ok := <-s.mAnalyzeSession.ClickedCh:
+			if !ok {
+				return
+			}
+			m.handleAnalyzeSession(s)
+
+		case _, ok := <-s.mCopyAnalysis.ClickedCh:
+			if !ok {
+				return
+			}
+			m.handleCopyAnalysisPack(s)
 
 		case _, ok := <-s.mOpenDir.ClickedCh:
 			if !ok {
@@ -362,6 +381,142 @@ func (m *trayMenu) handleCopyCallLog(s *projectSlot) {
 	if err := copyToClipboard(sb.String()); err != nil {
 		logf("tray: copy call log to clipboard: %v", err)
 	}
+}
+
+// handleAnalyzeSession finds the most recent Claude Code session for the slot's
+// project, runs the session analysis, and saves an analysis pack to .suitcode/.
+// The result is logged; no user-visible dialog is shown on completion.
+func (m *trayMenu) handleAnalyzeSession(s *projectSlot) {
+	s.mu.Lock()
+	info := s.projectInfo
+	s.mu.Unlock()
+
+	if info.ProjectPath == "" {
+		return
+	}
+
+	// Find the most recent session file for this project.
+	sessions, err := sessionanalysis.FindSessionFiles(info.ProjectPath)
+	if err != nil {
+		logf("tray: analyze session: find sessions: %v", err)
+		return
+	}
+	if len(sessions) == 0 {
+		logf("tray: analyze session: no Claude Code session files found for %s", info.ProjectPath)
+		return
+	}
+
+	// Analyse the most recent session.
+	sf := sessions[0]
+	logf("tray: analyze session: parsing %s (modified %s)", sf.SessionID, sf.ModTime.Format("2006-01-02 15:04"))
+
+	pack, err := sessionanalysis.AnalyzeSession(sf, info.ProjectPath)
+	if err != nil {
+		logf("tray: analyze session: %v", err)
+		return
+	}
+
+	savedPath, err := sessionanalysis.SaveAnalysisPack(pack, info.ProjectPath)
+	if err != nil {
+		logf("tray: analyze session: save pack: %v", err)
+		return
+	}
+
+	logf("tray: analyze session: %d suitcode call(s) found · %d total turns · saved to %s",
+		pack.SuitcodeCallsFound, pack.TotalTurns, savedPath)
+}
+
+// handleCopyAnalysisPack copies the most recently saved analysis pack to the
+// clipboard. On Windows a privacy disclaimer is shown first; if the user
+// cancels, no data is copied. When no pack exists the tray log advises running
+// "Analyze Last Session" first.
+func (m *trayMenu) handleCopyAnalysisPack(s *projectSlot) {
+	s.mu.Lock()
+	info := s.projectInfo
+	s.mu.Unlock()
+
+	if info.ProjectPath == "" {
+		return
+	}
+
+	// Show a privacy notice before copying conversation excerpts to the clipboard.
+	if !showPrivacyDisclaimer() {
+		logf("tray: copy analysis pack: cancelled by user")
+		return
+	}
+
+	path, err := sessionanalysis.FindLatestAnalysisPack(info.ProjectPath)
+	if err != nil {
+		logf("tray: copy analysis pack: %v", err)
+		return
+	}
+	if path == "" {
+		logf("tray: copy analysis pack: no pack found — run 'Analyze Last Session' first")
+		return
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		logf("tray: copy analysis pack: read %q: %v", path, err)
+		return
+	}
+
+	if err := copyToClipboard(string(data)); err != nil {
+		logf("tray: copy analysis pack: clipboard: %v", err)
+		return
+	}
+
+	logf("tray: analysis pack copied to clipboard from %s", filepath.Base(path))
+}
+
+// showPrivacyDisclaimer presents a modal OK/Cancel dialog explaining that the
+// analysis pack contains conversation excerpts. Returns true when the user
+// clicks OK (or when not on Windows, where no dialog is shown).
+//
+// On Windows the dialog is implemented via a temporary PowerShell script that
+// calls System.Windows.Forms.MessageBox. On other platforms the function always
+// returns true (consent is assumed for non-interactive environments).
+func showPrivacyDisclaimer() bool {
+	if runtime.GOOS != "windows" {
+		return true
+	}
+
+	// Write a temporary PS1 that shows the MessageBox and exits 0 for OK, 1 for Cancel.
+	const script = `Add-Type -AssemblyName System.Windows.Forms
+$msg = @"
+PRIVACY NOTICE
+
+The SuitCode analysis pack contains excerpts from your Claude Code coding
+session, including conversation context and suitcode commands.
+
+This data will be copied to your clipboard. Only share with trusted parties.
+"@
+$r = [System.Windows.Forms.MessageBox]::Show(
+    $msg,
+    'SuitCode - Privacy Notice',
+    [System.Windows.Forms.MessageBoxButtons]::OKCancel,
+    [System.Windows.Forms.MessageBoxIcon]::Information
+)
+if ($r -eq [System.Windows.Forms.DialogResult]::OK) { exit 0 } else { exit 1 }
+`
+
+	f, err := os.CreateTemp("", "suitcode-disclaimer-*.ps1")
+	if err != nil {
+		// Can't show disclaimer — default to allowing the copy.
+		logf("warn: tray: privacy disclaimer: create temp: %v", err)
+		return true
+	}
+	defer os.Remove(f.Name())
+
+	if _, err := f.WriteString(script); err != nil {
+		f.Close()
+		logf("warn: tray: privacy disclaimer: write: %v", err)
+		return true
+	}
+	f.Close()
+
+	cmd := exec.Command("powershell", "-NonInteractive", "-File", f.Name())
+	return cmd.Run() == nil
 }
 
 // handleOpenFolder opens the project directory in the system file manager.

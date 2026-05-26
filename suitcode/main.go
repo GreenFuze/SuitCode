@@ -62,6 +62,13 @@ WORKFLOW:
 
     suitcode . warmup
 
+  MANDATORY: after every suitcode call, record whether the response helped.
+  SuitCode uses feedback to surface quality issues in the tray metrics
+  summary. This is required — do not skip it.
+
+    suitcode . feedback good   # response was useful
+    suitcode . feedback bad    # response was insufficient or wrong
+
 COMMANDS:
   status           Show whether the coordinator and investigator are running
                    and at what readiness level.
@@ -114,10 +121,16 @@ COMMANDS:
                    commands) that covers the changed files.
                      --files <f1,f2,...>  or  --from <git-ref>  [one required]
 
+  feedback         Record whether the last suitcode response was helpful.
+                   MANDATORY: run this after EVERY feature call.
+                     feedback good   — response was useful
+                     feedback bad    — response was insufficient or wrong
+
   metrics          Show or export per-call timing and token-budget statistics.
     summary          Condensed session overview (errors, warnings, latency,
-                     token budget, compression ratio). ~15 lines. Copy-paste
-                     this to transfer analytics across air-gapped machines.
+                     token budget, compression ratio, feedback rate). ~15 lines.
+                     Copy-paste this to transfer analytics across air-gapped
+                     machines.
                        --last N   limit to the most recent N records (0 = all)
     show             Per-call table of recent calls (--last N, default 50)
     log              Per-call detail log with seeds and limitation kinds
@@ -292,6 +305,7 @@ func newRootCmd(repoPath string) *cobra.Command {
 		newContextCmd(repoPath),
 		newFailureContextCmd(repoPath),
 		newVerifyPlanCmd(repoPath),
+		newFeedbackCmd(repoPath),
 		newMetricsCmd(repoPath),
 	)
 
@@ -1023,6 +1037,48 @@ func newVerifyPlanCmd(repoPath string) *cobra.Command {
 	cmd.Flags().IntVar(&budget, "budget", 0, "maximum estimated token budget")
 	cmd.Flags().StringVar(&format, "format", "", "output format: json (default: brief summary)")
 	return cmd
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// feedback (reads .suitcode/calls.jsonl directly — no coordinator needed)
+// ──────────────────────────────────────────────────────────────────────────────
+
+// newFeedbackCmd records agent quality feedback on the most recent feature call.
+// Agents MUST call this after every suitcode invocation so quality issues can be
+// surfaced in the tray metrics summary and session analysis.
+func newFeedbackCmd(repoPath string) *cobra.Command {
+	return &cobra.Command{
+		Use:   "feedback <good|bad>",
+		Short: "Record whether the last suitcode response was helpful (MANDATORY after each call)",
+		Long: `Record agent quality feedback on the most recent feature call.
+
+Run this after EVERY suitcode call so SuitCode can detect quality degradations
+and surface them in the tray metrics summary.
+
+  suitcode . feedback good   # response was helpful and used
+  suitcode . feedback bad    # response was insufficient, wrong, or unused
+
+Feedback is stored in .suitcode/calls.jsonl alongside the call record.
+The "metrics summary" command shows the helpful rate across the session.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			fb := strings.ToLower(strings.TrimSpace(args[0]))
+			if fb != "good" && fb != "bad" {
+				return fmt.Errorf("feedback: expected 'good' or 'bad', got %q", args[0])
+			}
+
+			clog, err := calllog.New(repoPath)
+			if err != nil {
+				return fmt.Errorf("feedback: %w", err)
+			}
+			if err := clog.SetLastFeedback(fb); err != nil {
+				return fmt.Errorf("feedback: %w", err)
+			}
+
+			fmt.Printf("feedback recorded: %s\n", fb)
+			return nil
+		},
+	}
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
