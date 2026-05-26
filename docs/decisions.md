@@ -89,12 +89,14 @@ if p.lspClient == nil {
 
 **Decision:** Every language provider must use the language's official LSP server as the authoritative source for import graphs, file-level references, and symbol information.
 
-| Language | LSP server | Install |
-|---|---|---|
-| Go | `gopls` | `go install golang.org/x/tools/gopls@latest` |
-| C# | `csharp-ls` (wraps Roslyn) | `dotnet tool install --global csharp-ls` |
-| TypeScript/JavaScript | `typescript-language-server` | `npm install -g typescript-language-server typescript` |
-| Python | `pylsp` | `pip install python-lsp-server` |
+| Language | LSP server | Install | Prerequisite |
+|---|---|---|---|
+| Go | `gopls` | `go install golang.org/x/tools/gopls@latest` | Go toolchain |
+| C# | `csharp-ls` (wraps Roslyn) | `dotnet tool install --global csharp-ls` | **.NET 10 SDK** |
+| TypeScript/JavaScript | `typescript-language-server` | `npm install -g typescript-language-server typescript` | Node.js |
+| Python | `pylsp` | `pip install python-lsp-server` | Python |
+
+**C# note:** csharp-ls 0.22+ requires .NET 10 SDK. SuitCode requires the latest csharp-ls — .NET 10 is a hard prerequisite for C# support (`winget install Microsoft.DotNet.SDK.10`).
 
 **Rationale:**
 - LSP servers wrap the actual compiler. Their import graphs are the same graph the compiler uses.

@@ -29,12 +29,14 @@ If SuitCode cannot get an authoritative answer from a compiler, LSP server, buil
 
 Every language provider **must** use the language's official LSP server as the authoritative source for import graphs, file references, and symbol information. LSP servers wrap the actual compiler — their answers are compiler-verified.
 
-| Language | LSP server | Install |
-|---|---|---|
-| Go | `gopls` | `go install golang.org/x/tools/gopls@latest` |
-| C# | `csharp-ls` (wraps Roslyn) | `dotnet tool install --global csharp-ls` |
-| TypeScript/JavaScript | `typescript-language-server` | `npm install -g typescript-language-server typescript` |
-| Python | `pylsp` | `pip install python-lsp-server` |
+| Language | LSP server | Install | Prerequisite |
+|---|---|---|---|
+| Go | `gopls` | `go install golang.org/x/tools/gopls@latest` | Go toolchain |
+| C# | `csharp-ls` (wraps Roslyn) | `dotnet tool install --global csharp-ls` | **.NET 10 SDK** |
+| TypeScript/JavaScript | `typescript-language-server` | `npm install -g typescript-language-server typescript` | Node.js |
+| Python | `pylsp` | `pip install python-lsp-server` | Python |
+
+**C# note:** csharp-ls 0.22+ requires .NET 10 SDK (`winget install Microsoft.DotNet.SDK.10`). SuitCode requires the latest csharp-ls — .NET 10 is a hard prerequisite for C# support.
 
 Static AST parsing (JS/TS, Python) and manifest-based graphs (.csproj) are **current primary implementations** for capabilities where no LSP integration exists yet — they are NOT fallbacks for a missing LSP tool. As LSP integration is added, the static implementations are replaced, not kept as degraded alternatives.
 

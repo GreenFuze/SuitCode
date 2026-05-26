@@ -1499,15 +1499,11 @@ var lspTools = []depTool{
 		pmName:      "go",
 	},
 	{
-		// Pin to 0.20.0: the latest NuGet releases (0.21+) have a packaging
-		// defect ("DotnetToolSettings.xml was not found") and versions 0.22+
-		// require .NET 10 SDK.  0.20.0 is stable with .NET 9 and works correctly
-		// with the SuitCode LSP transport.
 		name:        "csharp-ls",
 		checkCmd:    "csharp-ls",
 		checkArgs:   []string{"--version"},
 		installCmd:  "dotnet",
-		installArgs: []string{"tool", "install", "--global", "csharp-ls", "--version", "0.20.0"},
+		installArgs: []string{"tool", "install", "--global", "csharp-ls"},
 		pmName:      "dotnet",
 	},
 	{
