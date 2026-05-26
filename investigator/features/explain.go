@@ -70,9 +70,26 @@ func RunExplainFile(
 	metrics, start := startMetrics(runID, "explain-file", req.RepoPath, budget)
 
 	// Locate the file in the index.
+	// When the file is not found we return a partial response with a
+	// "file_not_found" limitation rather than a hard error so that the CLI
+	// can exit 0 (succeeded with limitations) instead of exit 1 (hard failure).
+	// A hard error here produces HTTP 500, which the client interprets as a
+	// fatal failure even though the investigator itself is healthy.
 	fsFile, err := findFile(listing, req.FilePath, req.RepoPath)
 	if err != nil {
-		return nil, fmt.Errorf("explain-file: %w", err)
+		finishMetrics(&metrics, start, nil)
+		return &cfeatures.ExplainFileResponse{
+			BaseFeatureResponse: cfeatures.BaseFeatureResponse{
+				RunID: runID,
+				Limitations: []provider.Limitation{{
+					Kind:    "file_not_found",
+					Message: fmt.Sprintf("file not found in repository index: %q — verify the path is relative to the project root %q", req.FilePath, req.RepoPath),
+					Scope:   req.FilePath,
+				}},
+				Metrics: metrics,
+			},
+			FilePath: req.FilePath,
+		}, nil
 	}
 
 	resp := &cfeatures.ExplainFileResponse{

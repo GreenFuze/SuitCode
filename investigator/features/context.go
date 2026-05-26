@@ -211,13 +211,17 @@ func RunContext(
 		return candidates[i].file.RelPath < candidates[j].file.RelPath
 	})
 
-	// ── Budget selection (soft limit) ────────────────────────────────────────
+	// ── Budget selection (hard cap) ───────────────────────────────────────────
 	//
-	// All scored candidates are included in the response. Seed files (score=1.0)
-	// are never dropped — the caller explicitly requested them. Other candidates
-	// are included in rank order. When the total exceeds the requested budget a
-	// "budget_exceeded" limitation is appended so the agent knows the response
-	// is larger than requested and can decide how to proceed.
+	// Candidates are included in rank order (highest score first). The budget is
+	// a hard cap: once tokenUsed would exceed the budget, lower-priority files
+	// are dropped and recorded as rejections so the caller knows what was left
+	// out and why.
+	//
+	// Seed files (score=1.0) are ALWAYS included even if they alone push the
+	// capsule over budget — the caller explicitly requested them. A
+	// "seed_over_budget" limitation is emitted in that case so the caller can
+	// decide whether to raise the budget.
 
 	totalCandidateTokens := 0
 	for _, c := range candidates {
@@ -229,7 +233,23 @@ func RunContext(
 		BudgetRequested: budget,
 	}
 
-	for rank, c := range candidates {
+	rank := 0
+	for _, c := range candidates {
+		isSeed := c.score == 1.0
+
+		// Enforce hard budget for non-seed files: drop when adding this file
+		// would push the capsule over the budget.
+		if !isSeed && tokenUsed+c.est.Tokens > budget {
+			capsule.Rejections = append(capsule.Rejections, cfeatures.ContextRejection{
+				Candidate: cfeatures.ContextCandidate{
+					File:  fileToRef(c.file, fsProv(c.reason, c.file.Path)),
+					Score: c.score,
+				},
+				Reason: fmt.Sprintf("budget cap (%d tokens): would reach %d tokens", budget, tokenUsed+c.est.Tokens),
+			})
+			continue
+		}
+
 		// Read the file content for the capsule.
 		content, err := os.ReadFile(c.file.Path)
 		if err != nil {
@@ -243,8 +263,8 @@ func RunContext(
 			continue
 		}
 
+		rank++
 		tokenUsed += c.est.Tokens
-
 		prov := fsProv(c.reason, c.file.Path)
 
 		capsule.Selections = append(capsule.Selections, cfeatures.ContextSelection{
@@ -254,7 +274,7 @@ func RunContext(
 				ScoreReasons:  []string{c.reason},
 				TokenEstimate: c.est,
 			},
-			Rank:   rank + 1,
+			Rank:   rank,
 			Reason: c.reason,
 		})
 
@@ -265,17 +285,33 @@ func RunContext(
 			Provenance:    prov,
 			TokenEstimate: c.est,
 		})
+
+		// Warn when a seed file alone pushes the capsule over budget.
+		if isSeed && tokenUsed > budget {
+			resp.Limitations = append(resp.Limitations, provider.Limitation{
+				Kind: "seed_over_budget",
+				Message: fmt.Sprintf(
+					"seed file %q (%d tokens) alone exceeds the %d token budget; raise --budget to avoid truncation",
+					c.file.RelPath, c.est.Tokens, budget,
+				),
+				Scope: c.file.RelPath,
+			})
+		}
 	}
 
-	// Report overage when total tokens exceed the requested budget.
-	if tokenUsed > budget {
-		overage := tokenUsed - budget
-		overagePct := int(float64(overage) / float64(budget) * 100)
+	// Report how many files were trimmed (budget rejections only — not read errors).
+	budgetTrimmed := 0
+	for _, r := range capsule.Rejections {
+		if strings.HasPrefix(r.Reason, "budget cap") {
+			budgetTrimmed++
+		}
+	}
+	if budgetTrimmed > 0 {
 		resp.Limitations = append(resp.Limitations, provider.Limitation{
-			Kind: "budget_exceeded",
+			Kind: "budget_trimmed",
 			Message: fmt.Sprintf(
-				"context is %d%% over requested budget: %d tokens used vs %d requested (%d tokens over); all relevant files included",
-				overagePct, tokenUsed, budget, overage,
+				"%d lower-priority file(s) excluded to fit within the %d token budget; raise --budget or use --no-limit to include all",
+				budgetTrimmed, budget,
 			),
 		})
 	}

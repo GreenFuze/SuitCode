@@ -229,6 +229,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	// ── Subdirectory warning ──────────────────────────────────────────────────
+	//
+	// Walk up the directory tree looking for a .git directory. If one is found
+	// at a parent of repoPath the user is most likely running from a
+	// sub-directory of a larger project; warn so they understand what project
+	// root SuitCode is using. This does NOT abort — the user may intentionally
+	// run from a sub-project directory (e.g. a monorepo package).
+	if gitRoot := findGitRoot(repoPath); gitRoot != "" && gitRoot != repoPath {
+		fmt.Fprintf(os.Stderr,
+			"warning: using %q as project root, but .git is at %q\n"+
+				"         if this is unintentional, run: suitcode %s <command>\n",
+			repoPath, gitRoot, gitRoot)
+	}
+
 	cobra.MousetrapHelpText = ""
 
 	// Splice the directory out of os.Args so cobra sees [progname, subcommand, ...flags].
@@ -786,25 +800,26 @@ func newContextCmd(repoPath string) *cobra.Command {
 			return printFeatureResult(resp, format, func(resp *cfeatures.ContextResponse) {
 				printProgress(resp.BaseFeatureResponse)
 
-				// Check for budget overage limitation.
-				budgetExceeded := false
+				// Check whether any files were trimmed by the hard budget cap.
+				budgetTrimmed := 0
 				for _, lim := range resp.Limitations {
-					if lim.Kind == "budget_exceeded" {
-						budgetExceeded = true
+					if lim.Kind == "budget_trimmed" {
+						// Parse the trimmed count from the limitation message.
+						// Fall back to counting rejections with "budget cap" prefix.
 						break
 					}
 				}
-
-				if budgetExceeded {
-					overage := resp.Metrics.Budget.Used - resp.Metrics.Budget.Requested
-					overagePct := 0
-					if resp.Metrics.Budget.Requested > 0 {
-						overagePct = int(float64(overage) / float64(resp.Metrics.Budget.Requested) * 100)
+				for _, r := range resp.Capsule.Rejections {
+					if strings.HasPrefix(r.Reason, "budget cap") {
+						budgetTrimmed++
 					}
-					fmt.Printf("Context capsule: %d files · %d tokens (%d%% over %d token budget)\n",
-						resp.FilesIncluded, resp.Metrics.Budget.Used, overagePct, resp.Metrics.Budget.Requested)
+				}
+
+				saved := int((1 - resp.CompressionRatio) * 100)
+				if budgetTrimmed > 0 {
+					fmt.Printf("Context capsule: %d files · %d/%d tokens (%d%% saved, %d file(s) trimmed to fit budget)\n",
+						resp.FilesIncluded, resp.Metrics.Budget.Used, resp.Metrics.Budget.Requested, saved, budgetTrimmed)
 				} else {
-					saved := int((1 - resp.CompressionRatio) * 100)
 					fmt.Printf("Context capsule: %d files · %d/%d tokens (%d%% saved)\n",
 						resp.FilesIncluded, resp.Metrics.Budget.Used, resp.Metrics.Budget.Requested, saved)
 				}
@@ -814,7 +829,7 @@ func newContextCmd(repoPath string) *cobra.Command {
 					fmt.Printf("  included  %-6d tok  %s\n", f.TokenEstimate, f.RelPath)
 				}
 
-				// Print any files that were considered but excluded (read errors only now).
+				// Print excluded files (budget-trimmed and read-error rejections).
 				for _, r := range resp.Capsule.Rejections {
 					fmt.Printf("  excluded              %s — %s\n", r.Candidate.File.RelPath, r.Reason)
 				}
@@ -1178,6 +1193,26 @@ func logProgress(banner string) (stop func()) {
 
 	return func() {
 		once.Do(func() { close(done) })
+	}
+}
+
+// findGitRoot walks up from dir looking for a directory that contains a .git
+// entry (file or directory). Returns the absolute path of the git root, or ""
+// if no .git is found before the filesystem root. Used to warn when the user
+// is running SuitCode from a sub-directory of a larger git repository.
+func findGitRoot(dir string) string {
+	for {
+		// Check for .git — could be a directory or a worktree file.
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			return dir
+		}
+
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			// Reached the filesystem root without finding .git.
+			return ""
+		}
+		dir = parent
 	}
 }
 
