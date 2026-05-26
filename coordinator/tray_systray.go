@@ -145,9 +145,10 @@ type trayMenu struct {
 
 // projectSlot is one pre-allocated sub-menu entry for an active investigator.
 //
-//	[mParent ] ← top-level item; hovering it reveals a fly-out sub-menu (▶)
+//	[mParent  ] ← top-level item; hovering it reveals a fly-out sub-menu (▶)
 //	  [mCopyLog] ← "Copy Coordinator Log"
-//	  [mCopyMet] ← "Copy Metrics"
+//	  [mCopyMet] ← "Copy Metrics Summary"
+//	  [mCopyCall]← "Copy Call Log"
 //	  [mOpenDir] ← "Open Project Folder"
 //	  [mStop   ] ← "Stop Investigator"
 //
@@ -161,14 +162,15 @@ type trayMenu struct {
 // root HMENU), then call mParent.Hide(). The child HMENU is already attached
 // and survives Hide/Show cycles correctly thereafter.
 type projectSlot struct {
-	mParent  *systray.MenuItem // top-level sub-menu trigger; title = project path
-	mCopyLog *systray.MenuItem // sub-item: "Copy Coordinator Log"
-	mCopyMet *systray.MenuItem // sub-item: "Copy Metrics"
-	mOpenDir *systray.MenuItem // sub-item: "Open Project Folder"
-	mStop    *systray.MenuItem // sub-item: "Stop Investigator"
+	mParent   *systray.MenuItem // top-level sub-menu trigger; title = project path
+	mCopyLog  *systray.MenuItem // sub-item: "Copy Coordinator Log"
+	mCopyMet  *systray.MenuItem // sub-item: "Copy Metrics Summary"
+	mCopyCall *systray.MenuItem // sub-item: "Copy Call Log"
+	mOpenDir  *systray.MenuItem // sub-item: "Open Project Folder"
+	mStop     *systray.MenuItem // sub-item: "Stop Investigator"
 
 	mu          sync.Mutex
-	projectPath string           // empty when slot is hidden
+	projectPath string          // empty when slot is hidden
 	projectInfo coord.ProjectInfo // last polled state
 }
 
@@ -199,20 +201,22 @@ func (m *trayMenu) build() {
 
 		// Add sub-items while mParent is in the root HMENU — this is what
 		// makes convertToSubMenu's SetMenuItemInfo call succeed on Windows.
-		mCopyLog := mParent.AddSubMenuItem("Copy Coordinator Log", "Copy the coordinator log file to the clipboard")
-		mCopyMet := mParent.AddSubMenuItem("Copy Metrics", "Copy investigator metrics and session summary to the clipboard")
-		mOpenDir := mParent.AddSubMenuItem("Open Project Folder", "Open the project directory in the system file manager")
-		mStop := mParent.AddSubMenuItem("Stop Investigator", "Terminate the investigator process for this project")
+		mCopyLog  := mParent.AddSubMenuItem("Copy Coordinator Log", "Copy the coordinator log file to the clipboard")
+		mCopyMet  := mParent.AddSubMenuItem("Copy Metrics Summary", "Copy the condensed session summary (errors, warnings, latency) to the clipboard")
+		mCopyCall := mParent.AddSubMenuItem("Copy Call Log", "Copy the per-call detail log with seeds and limitation kinds to the clipboard")
+		mOpenDir  := mParent.AddSubMenuItem("Open Project Folder", "Open the project directory in the system file manager")
+		mStop     := mParent.AddSubMenuItem("Stop Investigator", "Terminate the investigator process for this project")
 
 		// Hide AFTER sub-items are attached so the child HMENU is wired up.
 		mParent.Hide()
 
 		s := &projectSlot{
-			mParent:  mParent,
-			mCopyLog: mCopyLog,
-			mCopyMet: mCopyMet,
-			mOpenDir: mOpenDir,
-			mStop:    mStop,
+			mParent:   mParent,
+			mCopyLog:  mCopyLog,
+			mCopyMet:  mCopyMet,
+			mCopyCall: mCopyCall,
+			mOpenDir:  mOpenDir,
+			mStop:     mStop,
 		}
 		m.slots[i] = s
 		go m.runSlotHandler(s)
@@ -279,6 +283,12 @@ func (m *trayMenu) runSlotHandler(s *projectSlot) {
 			}
 			m.handleCopyMetrics(s)
 
+		case _, ok := <-s.mCopyCall.ClickedCh:
+			if !ok {
+				return
+			}
+			m.handleCopyCallLog(s)
+
 		case _, ok := <-s.mOpenDir.ClickedCh:
 			if !ok {
 				return
@@ -326,6 +336,34 @@ func (m *trayMenu) handleCopyMetrics(s *projectSlot) {
 	}
 }
 
+// handleCopyCallLog formats the per-call detail log (seeds, tok/budget, latency,
+// limitation kinds) and copies the result to the clipboard.
+func (m *trayMenu) handleCopyCallLog(s *projectSlot) {
+	s.mu.Lock()
+	info := s.projectInfo
+	s.mu.Unlock()
+
+	if info.ProjectPath == "" {
+		return
+	}
+
+	logger, err := calllog.New(info.ProjectPath)
+	if err != nil {
+		logf("tray: copy call log: calllog.New: %v", err)
+		return
+	}
+
+	var sb strings.Builder
+	if err := logger.PrintCallLog(&sb, 100); err != nil {
+		logf("tray: copy call log: %v", err)
+		return
+	}
+
+	if err := copyToClipboard(sb.String()); err != nil {
+		logf("tray: copy call log to clipboard: %v", err)
+	}
+}
+
 // handleOpenFolder opens the project directory in the system file manager.
 func (m *trayMenu) handleOpenFolder(s *projectSlot) {
 	path := s.getProject()
@@ -365,7 +403,7 @@ func (m *trayMenu) refreshStatus() {
 		}
 	}
 
-	m.updateStatus(fmt.Sprintf("Coordinator: online · %d project(s)", count))
+	m.updateStatus(fmt.Sprintf("Coordinator: online | %d project(s)", count))
 
 	if m.mNoProjects != nil {
 		if count == 0 {
@@ -475,13 +513,13 @@ func (p *trayPoller) poll() {
 
 	projectsResp, err := p.client.GetProjects(ctx)
 	if err != nil {
-		p.menu.updateStatus(fmt.Sprintf("Coordinator: online · %d project(s)", health.Projects))
+		p.menu.updateStatus(fmt.Sprintf("Coordinator: online | %d project(s)", health.Projects))
 		p.menu.updateProjects(nil)
 		return
 	}
 
 	count := len(projectsResp.Projects)
-	p.menu.updateStatus(fmt.Sprintf("Coordinator: online · %d project(s)", count))
+	p.menu.updateStatus(fmt.Sprintf("Coordinator: online | %d project(s)", count))
 	p.menu.updateProjects(projectsResp.Projects)
 }
 

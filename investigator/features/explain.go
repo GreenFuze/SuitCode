@@ -1,10 +1,8 @@
 package features
 
 import (
-	"bufio"
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -263,19 +261,23 @@ func RunExplainFile(
 // Helpers
 // ──────────────────────────────────────────────────────────────────────────────
 
-// parseImports extracts import paths from a source file. When a language
-// provider is available it is used for JS/TS/Python/Go; otherwise the function
-// falls back to built-in heuristic scanners.
+// parseImports extracts import paths from a source file using the language
+// provider. An empty result from the provider is authoritative — we never fall
+// back to a weaker signal when a stronger one is available or has failed.
+//
+// If the provider is nil or not yet ready (pre-warmup), an empty result is
+// returned with a "no_import_provider" limitation. Callers should run
+// 'suitcode warmup' to ensure the import graph is initialised before calling
+// explain-file. No heuristic fallbacks exist — a silent regex scan would
+// produce incomplete results without clearly signalling the problem.
 func parseImports(
 	ctx context.Context,
 	f *provider.FilesystemFile,
-	repoPath string,
+	_ string, // repoPath — unused; kept for signature stability
 	listing *provider.ProviderResult[provider.FilesystemListing],
 	langProv provider.ImportGraphProvider,
 ) ([]provider.FileReference, []provider.Limitation) {
-	// When the import graph provider is ready, use it exclusively.
-	// An empty result is authoritative ("this file has no local imports") —
-	// we never silently fall back to a weaker signal when a stronger one exists.
+	// Provider is available and ready — use it exclusively.
 	if langProv != nil && langProv.Ready() {
 		res, err := langProv.FileImports(ctx, f.Path)
 		if err != nil {
@@ -292,167 +294,22 @@ func parseImports(
 				Scope:   f.RelPath,
 			}}
 		}
-		// Authoritative result — includes all provider-level limitations.
 		refs := absPathsToImportRefs(res.Data, listing, "import-graph-provider")
 		return refs, res.Limitations
 	}
 
-	// No import graph provider available — use best-effort heuristic scanner.
-	// A Limitation is always recorded so callers know the source is weaker than
-	// a resolved import graph.
-	switch f.Language {
-	case "Go":
-		return parseGoImports(f, repoPath)
-	case "Python":
-		return parsePythonImports(f, repoPath)
-	default:
-		return nil, []provider.Limitation{{
-			Kind:    "no_import_parser",
-			Message: fmt.Sprintf("no language provider ready and no built-in scanner for %s", f.Language),
-			Scope:   f.RelPath,
-		}}
-	}
-}
-
-// parseGoImports scans a Go file for import blocks and resolves local package
-// paths to FileReferences. Used only when no import graph provider is ready.
-// Returns a Limitation when the file cannot be read.
-func parseGoImports(f *provider.FilesystemFile, repoPath string) ([]provider.FileReference, []provider.Limitation) {
-	file, err := os.Open(f.Path)
-	if err != nil {
-		return nil, []provider.Limitation{{
-			Kind:    "file_unreadable",
-			Message: fmt.Sprintf("cannot read %s for import scanning: %v", f.RelPath, err),
-			Scope:   f.RelPath,
-		}}
-	}
-	defer file.Close()
-
-	var refs []provider.FileReference
-	var lims []provider.Limitation
-	inBlock := false
-	scanner := bufio.NewScanner(file)
-
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-
-		if strings.HasPrefix(line, "import (") {
-			inBlock = true
-			continue
-		}
-		if inBlock && line == ")" {
-			inBlock = false
-			continue
-		}
-
-		var importPath string
-		if inBlock {
-			// Strip alias if present, then extract the quoted path.
-			importPath = extractQuoted(line)
-		} else if strings.HasPrefix(line, "import ") {
-			importPath = extractQuoted(strings.TrimPrefix(line, "import "))
-		}
-
-		if importPath == "" {
-			continue
-		}
-
-		// Only record local imports (those starting with the module path or
-		// a relative path). Standard library and external imports are skipped.
-		if isLocalGoImport(importPath, repoPath) {
-			refs = append(refs, provider.FileReference{
-				RelPath:  importPath,
-				Language: "Go",
-				Role:     "source",
-				Provenance: provider.Provenance{
-					SourceKind:      provider.SourceKindSyntax,
-					SourceTool:      "go_import_scanner",
-					Authority:       provider.AuthorityDerived,
-					EvidenceSummary: fmt.Sprintf("import %q in %s (heuristic — no import graph available)", importPath, f.RelPath),
-					EvidencePaths:   []string{f.Path},
-				},
-			})
-		}
-	}
-
-	// Always record a limitation so callers know this is a heuristic result.
-	lims = append(lims, provider.Limitation{
-		Kind:    "heuristic_import_scan",
-		Message: fmt.Sprintf("no Go import graph provider ready; imports for %s resolved via regex scan — may be incomplete", f.RelPath),
-		Scope:   f.RelPath,
-	})
-
-	return refs, lims
-}
-
-// parsePythonImports performs a basic regex scan of Python import statements.
-// Used only when no import graph provider is ready.
-// Returns a Limitation when the file cannot be read.
-func parsePythonImports(f *provider.FilesystemFile, _ string) ([]provider.FileReference, []provider.Limitation) {
-	file, err := os.Open(f.Path)
-	if err != nil {
-		return nil, []provider.Limitation{{
-			Kind:    "file_unreadable",
-			Message: fmt.Sprintf("cannot read %s for import scanning: %v", f.RelPath, err),
-			Scope:   f.RelPath,
-		}}
-	}
-	defer file.Close()
-
-	var refs []provider.FileReference
-	scanner := bufio.NewScanner(file)
-
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if strings.HasPrefix(line, "from .") || strings.HasPrefix(line, "import .") {
-			// Relative import — this is local.
-			parts := strings.Fields(line)
-			if len(parts) >= 2 {
-				refs = append(refs, provider.FileReference{
-					RelPath:  parts[1],
-					Language: "Python",
-					Role:     "source",
-					Provenance: provider.Provenance{
-						SourceKind:      provider.SourceKindSyntax,
-						SourceTool:      "python_import_scanner",
-						Authority:       provider.AuthorityHeuristic,
-						EvidenceSummary: fmt.Sprintf("relative import %q in %s (heuristic — no import graph available)", parts[1], f.RelPath),
-						EvidencePaths:   []string{f.Path},
-					},
-				})
-			}
-		}
-	}
-
-	// Always record a limitation so callers know this is a heuristic result.
-	return refs, []provider.Limitation{{
-		Kind:    "heuristic_import_scan",
-		Message: fmt.Sprintf("no Python import graph provider ready; imports for %s resolved via regex scan — may be incomplete", f.RelPath),
-		Scope:   f.RelPath,
+	// Provider unavailable or not ready. Return empty imports with a clear
+	// limitation rather than a heuristic scan that may produce incorrect results.
+	// Possible causes: provider failed to load (installation error) or warmup
+	// has not completed yet.
+	return nil, []provider.Limitation{{
+		Kind: "no_import_provider",
+		Message: fmt.Sprintf(
+			"no language provider ready for %s — run 'suitcode . warmup' to initialise the import graph",
+			f.RelPath,
+		),
+		Scope: f.RelPath,
 	}}
-}
-
-func extractQuoted(s string) string {
-	s = strings.TrimSpace(s)
-	// Handle: "pkg", `pkg`, _ "pkg", name "pkg"
-	start := strings.IndexAny(s, `"` + "`")
-	if start < 0 {
-		return ""
-	}
-	q := s[start]
-	end := strings.IndexByte(s[start+1:], q)
-	if end < 0 {
-		return ""
-	}
-	return s[start+1 : start+1+end]
-}
-
-func isLocalGoImport(importPath, repoPath string) bool {
-	// Heuristic: if the path contains a dot (domain.com/...), treat it as
-	// potentially local only if it starts with the module path.
-	// For v1 we just flag paths with fewer than 2 slashes as likely local.
-	return !strings.Contains(importPath, ".") ||
-		strings.HasPrefix(importPath, filepath.Base(repoPath))
 }
 
 func buildTestCommand(f provider.FilesystemFile, listing *provider.ProviderResult[provider.FilesystemListing]) string {
