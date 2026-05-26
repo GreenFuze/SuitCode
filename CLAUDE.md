@@ -36,22 +36,51 @@ Every language provider **must** use the language's official LSP server as the a
 | TypeScript/JavaScript | `typescript-language-server` | `npm install -g typescript-language-server typescript` |
 | Python | `pylsp` | `pip install python-lsp-server` |
 
-Static AST parsing and .csproj graph parsing are acceptable as **fallbacks only** when the LSP server is not installed. They must be clearly labelled in `Provenance.Authority` as `AuthorityDerived`, never `AuthorityVerified`.
+Static AST parsing (JS/TS, Python) and manifest-based graphs (.csproj) are **current primary implementations** for capabilities where no LSP integration exists yet — they are NOT fallbacks for a missing LSP tool. As LSP integration is added, the static implementations are replaced, not kept as degraded alternatives.
 
-### 3. LSP servers are daemons tied to the investigator
+### 3. 3rd party tools are REQUIRED — no silent fallbacks, ever
 
-LSP servers are started **once** when the investigator initialises, and stopped when the investigator shuts down. They are **never** started per-call. Rules:
+This is the single most important policy in the codebase. It applies to **every** 3rd party tool SuitCode uses — LSP servers, compilers, runtimes, CLI tools, anything external:
+
+- If a required 3rd party tool is not installed → return `Limitation{Kind: "tool_not_available", Message: "... run 'suitcode installdeps'"}` and **empty data**.
+- If a tool is installed but a call fails → return `Limitation{Kind: "lsp_error" / "tool_error"}` and **empty data**.
+- **Never** silently fall back to a lower-quality implementation (e.g. project-level instead of file-level, proximity heuristic instead of import graph).
+
+**Why:** A degraded-quality fallback is worse than an honest "not available". The C# `.csproj` fallback for `FileImporters` (all files in referencing projects) was removed precisely because it returned 150 irrelevant files instead of 3 relevant ones — a confident wrong answer that corrupted context. The same logic applies to every external tool.
+
+**In code:**
+```go
+if p.lspClient == nil {
+    return &provider.ProviderResult[[]string]{
+        Data: []string{},
+        Limitations: []provider.Limitation{{
+            Kind:    "tool_not_available",
+            Message: "<tool> is required but not installed. Run 'suitcode installdeps'.",
+            Scope:   filePath,
+        }},
+    }, nil
+}
+```
+
+### 4. External tools are daemons tied to the investigator
+
+Long-running tools (LSP servers, language daemons) are started **once** when the investigator initialises and stopped when it shuts down. They are **never** started per-call. Rules:
 - No visible windows, no console output (stderr → coordinator log or discarded).
 - Lifetime is tied to the investigator via `Close()`.
-- The shared transport in `core/lsp/transport.go` must be used — never copy it into a provider.
+- The shared LSP transport in `core/lsp/transport.go` must be used for all LSP clients — never copy it into a provider.
 
-### 4. `suitcode installdeps` manages external dependencies
+### 5. `suitcode installdeps` / `suitcode verifydeps` manage external tools
 
-External LSP servers are not expected to be pre-installed. `suitcode installdeps` detects which languages are present in the repo and installs the required LSP servers using the language's native package manager. Run this on a new machine before `warmup`.
+All external tools (LSP servers and any other 3rd party binary SuitCode depends on) must be registered in `suitcode installdeps`. When adding a new tool dependency:
 
-Never require a user to manually install a dependency that `installdeps` can handle.
+1. Add it to the `lspTools` slice in `suitcode/main.go`.
+2. Implement fail-fast detection: if missing, return `tool_not_available`, never degrade.
+3. Run `suitcode installdeps` on a new machine before `warmup`.
+4. Use `suitcode verifydeps` in CI to assert the environment is complete.
 
-### 5. Fail-fast with full provenance
+Never silently degrade when a tool is absent. Never require users to figure out what's missing on their own.
+
+### 6. Fail-fast with full provenance
 
 Every `ProviderResult` carries:
 - `Provenance` — which tool produced this data, at what `Authority` level.
@@ -59,7 +88,7 @@ Every `ProviderResult` carries:
 
 Do not return empty data silently. Do not swallow errors. Prefer a clear limitation over a partial silent result.
 
-### 6. SuitCode is a CLI tool, not an MCP server
+### 7. SuitCode is a CLI tool, not an MCP server
 
 See `decisions.md §1` for the full rationale. The key point: agents call SuitCode directly via Bash/PowerShell. There is no MCP adapter, no IDE plugin, no protocol translation layer. Do not add one.
 
@@ -119,7 +148,8 @@ State is written to `.suitcode/` in each analysed repo. Add it to `.gitignore`.
 ## Key reminders
 
 - The shared LSP transport is `core/lsp/transport.go`. **Never** copy it into a provider package.
-- C# `FileImporters` uses `csharp-ls textDocument/references` when available. The .csproj fallback is intentionally coarser and will flood the response with noise — see `docs/decisions.md §9`.
+- **No silent fallbacks, ever.** If a 3rd party tool is not installed or fails, return `Limitation{Kind: "tool_not_available"}` + empty data. This is non-negotiable — see Principle 3. The C# `.csproj` project-level fallback for `FileImporters` was removed for this reason.
+- Every new external tool dependency **must** be added to `suitcode installdeps` (in `suitcode/main.go`). Use `suitcode verifydeps` to validate the environment.
 - `suitcode . feedback good|bad` should follow every feature call. Session analysis in the tray gives an independent edit-rate signal.
 - Run `suitcode installdeps` before `warmup` on any new machine or after adding a new language provider.
 - When a result is imprecise, check `docs/providers.md` — the limitation is probably already documented with a planned fix.

@@ -51,6 +51,38 @@ a non-obvious decision is made, so future contributors (and LLM agents) don't re
 
 ---
 
+## 3a. No fallback for missing 3rd party tools — fail fast with `tool_not_available`
+
+**Challenge:** When a required 3rd party tool (LSP server, compiler, runtime, CLI binary) is not installed, it's tempting to return a degraded result rather than nothing.
+
+**Decision:** When a required external tool is not available, SuitCode returns `Limitation{Kind: "tool_not_available"}` and **empty data**. No fallback to a lower-quality implementation is ever used.
+
+**The concrete example that forced this decision:** C# `FileImporters` had a `.csproj` project-level fallback: when `csharp-ls` was not installed, it returned every file in every referencing project. For a 150-file `MGA.Desktop` project, this meant `App.axaml`, `Program.cs`, `LoadingSpinner.cs`, `Themes/` all appeared as "importers" of `MgaApiService.cs` even though they never referenced it. The agent received 150 files instead of 3. This was far worse than returning nothing — it actively polluted the context.
+
+**The general principle:** A degraded-quality answer is not "better than nothing". In many cases it is *worse than nothing* because:
+1. The agent trusts the result and makes decisions based on it.
+2. A wrong-but-voluminous result (150 files) crowds out the correct context (3 files).
+3. The agent has no way to know the result quality was degraded.
+
+**In code:** Every method that depends on a 3rd party tool must check for availability first:
+```go
+if p.lspClient == nil {
+    return &provider.ProviderResult[[]string]{
+        Data: []string{},
+        Limitations: []provider.Limitation{{
+            Kind:    "tool_not_available",
+            Message: "csharp-ls is required but not installed. Run 'suitcode installdeps'.",
+        }},
+    }, nil
+}
+```
+
+**This applies to:** LSP servers, compilers (`go build`, `dotnet`), runtime interpreters, CLI tools (any external binary). If it's not part of the Go binary, it's a 3rd party tool and must fail fast when absent.
+
+**Does not apply to:** Static AST parsing for JS/TS and Python — those are the *current primary implementation* of those providers, not a fallback for a missing tool. They are replaced (not kept alongside) as LSP integration is added.
+
+---
+
 ## 4. LSP-first for all language providers
 
 **Challenge:** Static AST parsing misses dynamic imports, path aliases, conditional compilation, and cross-project references. Project-level C# references flood importers with hundreds of irrelevant files.
