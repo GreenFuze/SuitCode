@@ -4,6 +4,8 @@
 // packages.
 package provider
 
+import "context"
+
 
 // ProviderID uniquely identifies a registered provider.
 type ProviderID string
@@ -53,6 +55,19 @@ type DaemonInfo struct {
 	Binary  string `json:"binary,omitempty"` // resolved path to the binary
 	Running bool   `json:"running"`          // true if the subprocess is alive
 	PID     int    `json:"pid,omitempty"`    // OS process ID when running
+}
+
+// DaemonWaiter is implemented by language providers that start one or more
+// background daemon processes (e.g. LSP servers). WaitForDaemons blocks until
+// every daemon owned by the provider has finished starting — whether
+// successfully or not — or until ctx is cancelled. Returns true when all
+// daemons are running and ready; false on startup failure or cancellation.
+//
+// Providers whose daemons initialise synchronously (already done before the
+// constructor returns) still implement this interface and simply return
+// immediately — so callers never need to know whether startup was sync or async.
+type DaemonWaiter interface {
+	WaitForDaemons(ctx context.Context) bool
 }
 
 // ProviderResult wraps typed provider output together with the evidence

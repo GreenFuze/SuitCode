@@ -59,16 +59,16 @@ func (inv *ProjectInvestigator) Warm(ctx context.Context) error {
 	inv.mu.Unlock()
 
 	if hasLang {
-		goplsCtx, goplsCancel := context.WithTimeout(ctx, 90*time.Second)
-		goplsOK := inv.langDispatcher.WaitForGopls(goplsCtx)
-		goplsCancel()
+		daemonCtx, daemonCancel := context.WithTimeout(ctx, 90*time.Second)
+		allReady := inv.langDispatcher.WaitForAllDaemons(daemonCtx)
+		daemonCancel()
 
 		inv.mu.Lock()
 		inv.readiness = ReadinessLevel3
-		if goplsOK {
-			logf("readiness level 3 — package graph + language servers ready")
+		if allReady {
+			logf("readiness level 3 — package graph + all language servers ready")
 		} else {
-			logf("readiness level 3 — package graph ready (gopls not ready within 90s)")
+			logf("readiness level 3 — package graph ready (one or more language servers not ready within 90s)")
 		}
 		inv.mu.Unlock()
 	}

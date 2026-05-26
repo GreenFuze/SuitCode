@@ -134,6 +134,12 @@ func (p *GoLanguageProvider) WaitForGopls(ctx context.Context) bool {
 	}
 }
 
+// WaitForDaemons implements provider.DaemonWaiter. For the Go provider the
+// only daemon is gopls, so this is a direct delegate to WaitForGopls.
+func (p *GoLanguageProvider) WaitForDaemons(ctx context.Context) bool {
+	return p.WaitForGopls(ctx)
+}
+
 // DaemonInfo returns information about the gopls subprocess managed by this
 // provider. Returns a not-running DaemonInfo when gopls has not started.
 func (p *GoLanguageProvider) DaemonInfo() provider.DaemonInfo {
@@ -544,3 +550,4 @@ func notReadyResult[T any](accumulated []provider.Limitation) *provider.Provider
 
 var _ provider.LanguageProvider = (*GoLanguageProvider)(nil)
 var _ provider.ImportGraphProvider = (*GoLanguageProvider)(nil)
+var _ provider.DaemonWaiter = (*GoLanguageProvider)(nil)

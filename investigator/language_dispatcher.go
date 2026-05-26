@@ -175,15 +175,51 @@ func (d *LanguageDispatcher) GoplsReady() bool {
 	return d.goProvider != nil && d.goProvider.GoplsReady()
 }
 
-// WaitForGopls blocks until the Go provider's gopls subprocess has finished
-// starting (success or failure) or until ctx is cancelled. Returns true if
-// gopls is ready for symbol queries. Returns true immediately when no Go
-// provider is present (gopls is not applicable to the repository).
-func (d *LanguageDispatcher) WaitForGopls(ctx context.Context) bool {
-	if d.goProvider == nil {
+// WaitForAllDaemons blocks until every language provider's background daemons
+// have finished starting (success or failure) or until ctx is cancelled.
+// Providers are waited on concurrently so the total wait is bounded by the
+// slowest daemon, not the sum of all startup times. Returns true when all
+// daemons reported ready; false if any failed or ctx was cancelled.
+//
+// Providers that have no daemons (JS/TS, Python static AST) and providers
+// that initialise synchronously (csharp-ls) return immediately — this call
+// only blocks as long as genuinely async daemons (e.g. gopls) need.
+func (d *LanguageDispatcher) WaitForAllDaemons(ctx context.Context) bool {
+	// Collect every active provider that implements DaemonWaiter.
+	type waiter struct{ name string; w provider.DaemonWaiter }
+	var waiters []waiter
+	if d.goProvider != nil {
+		waiters = append(waiters, waiter{"go", d.goProvider})
+	}
+	if d.csProvider != nil {
+		waiters = append(waiters, waiter{"csharp", d.csProvider})
+	}
+
+	if len(waiters) == 0 {
 		return true
 	}
-	return d.goProvider.WaitForGopls(ctx)
+
+	// Fan out: each waiter runs in its own goroutine.
+	results := make(chan bool, len(waiters))
+	for _, w := range waiters {
+		go func(w waiter) {
+			results <- w.w.WaitForDaemons(ctx)
+		}(w)
+	}
+
+	// Collect all results; short-circuit on ctx cancellation.
+	allReady := true
+	for range waiters {
+		select {
+		case ok := <-results:
+			if !ok {
+				allReady = false
+			}
+		case <-ctx.Done():
+			return false
+		}
+	}
+	return allReady
 }
 
 // JSReady reports whether the JavaScript/TypeScript import graph is ready.

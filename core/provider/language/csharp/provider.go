@@ -160,6 +160,15 @@ func (p *CSHarpLanguageProvider) DaemonInfo() provider.DaemonInfo {
 	}
 }
 
+// WaitForDaemons implements provider.DaemonWaiter. csharp-ls is initialised
+// synchronously in the constructor (Initialize blocks until the LSP handshake
+// completes), so this method returns immediately. It exists so the dispatcher
+// can treat all providers uniformly via the DaemonWaiter interface, and so
+// that future async startup can be added here without changing call-sites.
+func (p *CSHarpLanguageProvider) WaitForDaemons(_ context.Context) bool {
+	return p.lspClient != nil
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // provider.LanguageProvider implementation
 // ──────────────────────────────────────────────────────────────────────────────
@@ -436,3 +445,4 @@ func notReadyResult[T any](accumulated []provider.Limitation) *provider.Provider
 
 var _ provider.LanguageProvider = (*CSHarpLanguageProvider)(nil)
 var _ provider.ImportGraphProvider = (*CSHarpLanguageProvider)(nil)
+var _ provider.DaemonWaiter = (*CSHarpLanguageProvider)(nil)
