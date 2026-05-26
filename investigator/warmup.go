@@ -53,12 +53,12 @@ func (inv *ProjectInvestigator) Warm(ctx context.Context) error {
 	// Release the lock before waiting for gopls. Feature calls at Level 2 can
 	// proceed with the file index and import graph while the LSP handshake
 	// completes. gopls typically takes 10–30 s; we cap at 90 s.
-	hasLang := inv.multiProvider.HasAnyLanguageProvider()
+	hasLang := inv.langDispatcher.HasAnyLanguageProvider()
 	inv.mu.Unlock()
 
 	if hasLang {
 		goplsCtx, goplsCancel := context.WithTimeout(ctx, 90*time.Second)
-		goplsOK := inv.multiProvider.WaitForGopls(goplsCtx)
+		goplsOK := inv.langDispatcher.WaitForGopls(goplsCtx)
 		goplsCancel()
 
 		inv.mu.Lock()

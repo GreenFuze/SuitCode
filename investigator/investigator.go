@@ -16,7 +16,6 @@ import (
 	cfeatures "github.com/GreenFuze/SuitCode/core/features"
 	"github.com/GreenFuze/SuitCode/core/provider"
 	"github.com/GreenFuze/SuitCode/core/provider/filesystem"
-	multiprovider "github.com/GreenFuze/SuitCode/core/provider/language/multi"
 	"github.com/GreenFuze/SuitCode/core/provider/vcs"
 	"github.com/GreenFuze/SuitCode/investigator/artifacts"
 	invfeatures "github.com/GreenFuze/SuitCode/investigator/features"
@@ -79,10 +78,10 @@ type ProjectInvestigator struct {
 	fsProvider  *filesystem.Provider
 	vcsProvider *vcs.Provider
 
-	// multiProvider owns all language providers (Go, JS/TS, Python) and merges
-	// their results. Feature handlers interact exclusively through this composite
-	// so polyglot repositories benefit from all applicable providers simultaneously.
-	multiProvider *multiprovider.MultiLangProvider
+	// langDispatcher owns all language providers (Go, JS/TS, Python, C#) and
+	// routes each query to exactly the one provider responsible for the file's
+	// extension. Feature handlers interact exclusively through this dispatcher.
+	langDispatcher *LanguageDispatcher
 
 	// Cached file listing (populated during Warm).
 	mu           sync.RWMutex
@@ -123,21 +122,21 @@ func NewProjectInvestigator(ctx context.Context, repoPath string) (*ProjectInves
 		store = nil
 	}
 
-	// Language providers — MultiLangProvider constructs and owns Go, JS/TS, and
-	// Python providers internally, skipping any that are unavailable for this repo.
-	multiP := multiprovider.NewMultiLangProvider(ctx, absPath)
+	// Language dispatcher — constructs and owns Go, JS/TS, Python, and C# providers
+	// internally, skipping any that are unavailable for this repo.
+	dispatcher := NewLanguageDispatcher(ctx, absPath)
 
 	// Require at least one meaningful provider beyond the filesystem layer.
 	// A VCS-less, language-less directory offers too little value to justify
 	// running a daemon. Fail fast so the coordinator surfaces a clear error
 	// rather than serving empty responses forever.
-	if vcsP == nil && !multiP.HasAnyLanguageProvider() {
+	if vcsP == nil && !dispatcher.HasAnyLanguageProvider() {
 		_ = fsP.Close()
-		_ = multiP.Close()
+		_ = dispatcher.Close()
 		return nil, fmt.Errorf(
 			"investigator: %q has no supported providers — "+
 				"not a git repository and no recognized language project "+
-				"(supported languages: Go, JavaScript, TypeScript, Python)",
+				"(supported languages: Go, JavaScript, TypeScript, Python, C#)",
 			absPath,
 		)
 	}
@@ -146,14 +145,14 @@ func NewProjectInvestigator(ctx context.Context, repoPath string) (*ProjectInves
 	clog, _ := calllog.New(absPath)
 
 	inv := &ProjectInvestigator{
-		repoPath:      absPath,
-		cfg:           cfg,
-		estimator:     provider.NewHeuristicEstimator(),
-		fsProvider:    fsP,
-		vcsProvider:   vcsP,
-		multiProvider: multiP,
-		store:         store,
-		callLogger:    clog,
+		repoPath:       absPath,
+		cfg:            cfg,
+		estimator:      provider.NewHeuristicEstimator(),
+		fsProvider:     fsP,
+		vcsProvider:    vcsP,
+		langDispatcher: dispatcher,
+		store:          store,
+		callLogger:     clog,
 	}
 
 	return inv, nil
@@ -173,8 +172,8 @@ func (inv *ProjectInvestigator) Close() error {
 			errs = append(errs, err)
 		}
 	}
-	if inv.multiProvider != nil {
-		if err := inv.multiProvider.Close(); err != nil {
+	if inv.langDispatcher != nil {
+		if err := inv.langDispatcher.Close(); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -241,9 +240,9 @@ func (inv *ProjectInvestigator) Status() InvestigatorStatus {
 	}
 
 	// Go language provider (import graph + gopls).
-	if inv.multiProvider.GoReady() {
+	if inv.langDispatcher.GoReady() {
 		var goSummary string
-		if inv.multiProvider.GoplsReady() {
+		if inv.langDispatcher.GoplsReady() {
 			goSummary = "package graph + gopls ready"
 		} else {
 			goSummary = "package graph loaded (gopls starting or unavailable)"
@@ -264,7 +263,7 @@ func (inv *ProjectInvestigator) Status() InvestigatorStatus {
 	}
 
 	// JS/TS language provider (static import analysis).
-	if inv.multiProvider.JSReady() {
+	if inv.langDispatcher.JSReady() {
 		status.Providers = append(status.Providers, ProviderStatus{
 			ProviderID:  "js-language",
 			DisplayName: "JS/TS Language Provider (static import analysis)",
@@ -281,7 +280,7 @@ func (inv *ProjectInvestigator) Status() InvestigatorStatus {
 	}
 
 	// Python language provider (static import analysis).
-	if inv.multiProvider.PyReady() {
+	if inv.langDispatcher.PyReady() {
 		status.Providers = append(status.Providers, ProviderStatus{
 			ProviderID:  "python-language",
 			DisplayName: "Python Language Provider (static import analysis)",
@@ -298,7 +297,7 @@ func (inv *ProjectInvestigator) Status() InvestigatorStatus {
 	}
 
 	// C# language provider (csproj ProjectReference graph + Avalonia pair detection).
-	if inv.multiProvider.CSReady() {
+	if inv.langDispatcher.CSReady() {
 		status.Providers = append(status.Providers, ProviderStatus{
 			ProviderID:  "csharp-language",
 			DisplayName: "C# Language Provider (csproj ProjectReference graph + Avalonia)",
@@ -366,11 +365,11 @@ func (inv *ProjectInvestigator) ExplainFile(ctx context.Context, req cfeatures.E
 		return nil, fmt.Errorf("explain-file: %w", err)
 	}
 
-	resp, retErr = invfeatures.RunExplainFile(ctx, req, listing, inv.estimator, inv.multiProvider)
+	resp, retErr = invfeatures.RunExplainFile(ctx, req, listing, inv.estimator, inv.langDispatcher)
 
 	// Augment with NuGet package references when the C# provider is active.
 	if retErr == nil && resp != nil {
-		if pkgRefs := inv.multiProvider.GetCSPackageRefs(resp.FilePath); len(pkgRefs) > 0 {
+		if pkgRefs := inv.langDispatcher.GetCSPackageRefs(resp.FilePath); len(pkgRefs) > 0 {
 			resp.ExternalDependencies = make([]cfeatures.ExternalDependency, len(pkgRefs))
 			for i, r := range pkgRefs {
 				resp.ExternalDependencies[i] = cfeatures.ExternalDependency{
@@ -405,7 +404,7 @@ func (inv *ProjectInvestigator) Related(ctx context.Context, req cfeatures.Relat
 	if err != nil {
 		return nil, fmt.Errorf("related: %w", err)
 	}
-	return invfeatures.RunRelated(ctx, req, listing, inv.estimator, inv.multiProvider)
+	return invfeatures.RunRelated(ctx, req, listing, inv.estimator, inv.langDispatcher)
 }
 
 func (inv *ProjectInvestigator) Tests(ctx context.Context, req cfeatures.TestsRequest) (resp *cfeatures.TestsResponse, retErr error) {
@@ -428,7 +427,7 @@ func (inv *ProjectInvestigator) Tests(ctx context.Context, req cfeatures.TestsRe
 	if err != nil {
 		return nil, fmt.Errorf("tests: %w", err)
 	}
-	return invfeatures.RunTests(ctx, req, listing, inv.estimator, inv.multiProvider)
+	return invfeatures.RunTests(ctx, req, listing, inv.estimator, inv.langDispatcher)
 }
 
 func (inv *ProjectInvestigator) Impact(ctx context.Context, req cfeatures.ImpactRequest) (resp *cfeatures.ImpactResponse, retErr error) {
@@ -490,7 +489,7 @@ func (inv *ProjectInvestigator) Context(ctx context.Context, req cfeatures.Conte
 	if err != nil {
 		return nil, fmt.Errorf("context: %w", err)
 	}
-	return invfeatures.RunContext(ctx, req, listing, inv.estimator, inv.multiProvider)
+	return invfeatures.RunContext(ctx, req, listing, inv.estimator, inv.langDispatcher)
 }
 
 func (inv *ProjectInvestigator) FailureContext(ctx context.Context, req cfeatures.FailureContextRequest) (resp *cfeatures.FailureContextResponse, retErr error) {
@@ -509,7 +508,7 @@ func (inv *ProjectInvestigator) FailureContext(ctx context.Context, req cfeature
 	if err != nil {
 		return nil, fmt.Errorf("failure-context: %w", err)
 	}
-	return invfeatures.RunFailureContext(ctx, req, listing, inv.estimator, inv.multiProvider)
+	return invfeatures.RunFailureContext(ctx, req, listing, inv.estimator, inv.langDispatcher)
 }
 
 func (inv *ProjectInvestigator) VerifyPlan(ctx context.Context, req cfeatures.VerifyPlanRequest) (resp *cfeatures.VerifyPlanResponse, retErr error) {
@@ -548,13 +547,13 @@ func (inv *ProjectInvestigator) VerifyPlan(ctx context.Context, req cfeatures.Ve
 // GoplsReady reports whether the gopls subprocess has been started and is ready
 // to answer symbol queries. Returns false when the Go provider is not loaded.
 func (inv *ProjectInvestigator) GoplsReady() bool {
-	return inv.multiProvider.GoplsReady()
+	return inv.langDispatcher.GoplsReady()
 }
 
 // GetFileSymbols returns the symbol names defined in the file at absPath.
 // Returns an empty slice (not an error) when no symbol provider is ready.
 func (inv *ProjectInvestigator) GetFileSymbols(ctx context.Context, absPath string) ([]string, error) {
-	result, err := inv.multiProvider.GetSymbols(ctx, absPath)
+	result, err := inv.langDispatcher.GetSymbols(ctx, absPath)
 	if err != nil {
 		return nil, fmt.Errorf("get-file-symbols: %w", err)
 	}

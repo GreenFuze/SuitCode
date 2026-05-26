@@ -243,14 +243,14 @@ func TestGetImports_GoplsPackage(t *testing.T) {
 	skipIfShort(t, "requires go/packages load")
 
 	inv := sharedInv(t)
-	if !inv.multiProvider.GoReady() {
+	if !inv.langDispatcher.GoReady() {
 		t.Skip("no Go language provider available")
 	}
 
 	ctx := context.Background()
 	absPath := filepath.Join(inv.repoPath, "core", "provider", "language", "go", "provider.go")
 
-	result, err := inv.multiProvider.GetImports(ctx, absPath)
+	result, err := inv.langDispatcher.GetImports(ctx, absPath)
 	if err != nil {
 		t.Fatalf("GetImports: %v", err)
 	}
@@ -274,14 +274,14 @@ func TestFileImporters_CoreProvider(t *testing.T) {
 	skipIfShort(t, "requires go/packages load for reverse import index")
 
 	inv := sharedInv(t)
-	if !inv.multiProvider.GoReady() {
+	if !inv.langDispatcher.GoReady() {
 		t.Skip("no Go language provider available")
 	}
 
 	ctx := context.Background()
 	absPath := filepath.Join(inv.repoPath, "core", "provider", "roles.go")
 
-	result, err := inv.multiProvider.FileImporters(ctx, absPath)
+	result, err := inv.langDispatcher.FileImporters(ctx, absPath)
 	if err != nil {
 		t.Fatalf("FileImporters: %v", err)
 	}
@@ -318,14 +318,14 @@ func TestFileImports_EvalPackage(t *testing.T) {
 	skipIfShort(t, "requires go/packages load")
 
 	inv := sharedInv(t)
-	if !inv.multiProvider.GoReady() {
+	if !inv.langDispatcher.GoReady() {
 		t.Skip("no Go language provider available")
 	}
 
 	ctx := context.Background()
 	absPath := filepath.Join(inv.repoPath, "investigator", "eval", "runner.go")
 
-	result, err := inv.multiProvider.FileImports(ctx, absPath)
+	result, err := inv.langDispatcher.FileImports(ctx, absPath)
 	if err != nil {
 		t.Fatalf("FileImports: %v", err)
 	}
@@ -355,11 +355,11 @@ func TestGetFileSymbols_InvestigatorFile(t *testing.T) {
 	ctx := context.Background()
 
 	deadline := time.Now().Add(30 * time.Second)
-	for !inv.multiProvider.GoplsReady() && time.Now().Before(deadline) {
+	for !inv.langDispatcher.GoplsReady() && time.Now().Before(deadline) {
 		time.Sleep(200 * time.Millisecond)
 	}
 
-	if !inv.multiProvider.GoplsReady() {
+	if !inv.langDispatcher.GoplsReady() {
 		t.Skip("gopls not ready after 30s — skipping symbol test")
 	}
 
