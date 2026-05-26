@@ -6,9 +6,11 @@
 
 **Your coding agent actually knows your codebase. Not guesses — knows.**
 
-> **Measured on a real 500-file C# codebase, single 2-day session, 89 calls:**
-> 54% of context calls were directly followed by a code edit — rising to ~80% once the agent calibrated its usage.
-> Average context compression: **10–40×** (500-file repo → 12–15 files loaded).
+> **Measured across two real multi-day sessions on a polyglot monorepo (Go backend + TypeScript/React frontend + C# Avalonia desktop):**
+> - **15.9× average compression ratio** across 26 logged feature calls — 500-file repo → 8–15 files loaded per call
+> - **~60% of feature calls directly preceded code edits** across 138 total calls over 3 days
+> - **Largest single chain:** 57 files created from one context capsule (the entire cross-platform desktop scaffold)
+> - **28 development phases** completed end-to-end with no manual file hunting
 
 ---
 
@@ -41,14 +43,22 @@ SuitCode never returns a result it can't back with a verified signal. If the imp
 
 ## Real-world validation
 
-We ran SuitCode on a single 2-day, 89-call Claude Code session building a cross-platform desktop app in C#. The session analysis showed:
+We ran SuitCode across two multi-day Claude Code sessions building a full cross-platform product: a Go/TypeScript web backend and a C# Avalonia desktop client. The sessions covered 3 languages simultaneously, 28 development phases, and 3,219 conversation turns.
 
-- **~54% of feature calls directly preceded code edits** (adjusted for expected no-edit calls like warmup and metrics)
-- The **5 highest-signal calls each preceded 1–66 files being created or edited** within 2–5 turns
-- **Context quality was high** — the failure modes were tooling (PowerShell piping, warmup instability), not bad context
-- After agents calibrated to use `--output <file>` and appropriate budgets, the late-session edit rate reached ~4/5
+**Session 2 — 3 days, 138 calls, polyglot (Go + TypeScript/React + C# Avalonia):**
 
-This is one data point, not a large-scale study. SuitCode includes a built-in session analysis tool so you can measure your own sessions — no manual instrumentation needed.
+- **15.9× average compression** — the agent's own `suitcode . metrics summary` at session end: _"26 calls · avg 6,056 tokens · 15.9× compression ratio"_
+- **~60% of feature calls directly preceded code edits**
+- **Largest single chain:** one context capsule → 57 files created (the entire desktop scaffold: ViewModels, Views, Services, API client, themes, tests)
+- **Consistent cadence:** context → 2–43 turns → edits, across all 28 phases
+- **Import graph quality confirmed:** agent explicitly noted _"csharp-ls is resolving imports"_ and _"Import graph is accurate and complete"_ after csharp-ls was installed
+
+**Session 1 — 2 days, 89 calls, C# codebase:**
+
+- ~54% of feature calls directly preceded code edits (rising to ~4/5 once agent calibrated)
+- Highest-signal calls each preceded 1–66 files edited
+
+These are real sessions, not benchmarks. SuitCode includes a built-in session analysis tool so you can measure your own sessions — no manual instrumentation needed.
 
 ---
 
@@ -267,7 +277,7 @@ The `--output` flag is available on every feature command.
 | Go | `go/packages` (full, multi-module) | `gopls` | ✓ |
 | TypeScript / JavaScript | Static AST + tsconfig path aliases | — | ✓ |
 | Python | Static AST + relative import resolution | — | ✓ |
-| C# | — | — | ✓ (directory and filename conventions) |
+| C# | `.csproj` project-reference graph + `csharp-ls` file-level importers | — | ✓ (directory and filename conventions) |
 
 More languages are on the roadmap. SuitCode's provider model makes it straightforward to add new language backends without changing the core.
 
