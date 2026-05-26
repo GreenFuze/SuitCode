@@ -60,7 +60,7 @@ provider or modifying an existing one.
 ### LSP server
 - **Binary:** `csharp-ls` ([github.com/razzmatazz/csharp-language-server](https://github.com/razzmatazz/csharp-language-server))
 - **Install:** `dotnet tool install --global csharp-ls`
-- **Requires:** .NET SDK in PATH (which is already required to build C# projects).
+- **Requires:** **.NET 10 SDK** in PATH. csharp-ls 0.22+ requires .NET 10 — earlier SDK versions will not work. Install: `winget install Microsoft.DotNet.SDK.10`.
 - **Startup:** `csharp-ls` — stdio JSON-RPC 2.0, workspace root passed via LSP `initialize.rootUri`.
 - **Lifetime:** Tied to the investigator.
 

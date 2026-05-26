@@ -191,7 +191,56 @@ The .csproj graph is retained as a fallback when `csharp-ls` is not installed.
 
 ---
 
-## 10. Feedback system for measuring usefulness
+## 10. DaemonWaiter interface — generalised daemon readiness
+
+**Challenge:** `WaitForGopls` was hardcoded in `warmup.go` and `LanguageDispatcher`, meaning adding a new LSP server (e.g. csharp-ls) required modifying the warmup code. The naming also implied only gopls was waited on.
+
+**Decision:** Introduce a `provider.DaemonWaiter` interface (`WaitForDaemons(ctx context.Context) bool`). Both `GoLanguageProvider` and `CSHarpLanguageProvider` implement it. `LanguageDispatcher.WaitForAllDaemons` fans out to all registered waiters concurrently — the total wait is bounded by the slowest daemon, not their sum.
+
+**Rationale:**
+- `csharp-ls` initialises synchronously in the constructor; its `WaitForDaemons` returns immediately. `gopls` is async (the compiler walk happens in a goroutine); its `WaitForDaemons` blocks until the `goplsDone` channel closes.
+- New LSP servers added in the future implement `DaemonWaiter` and are automatically waited on — `warmup.go` doesn't change.
+- Concurrent fan-out means startup time stays bounded by the single slowest daemon, not the cumulative sum.
+
+---
+
+## 11. Working directory / project root resolution
+
+**Challenge:** Agents often start in a subdirectory of a project (e.g. `src/auth/`) and run `suitcode .` — which creates an investigator scoped to that subdirectory, not the project root. Later, if the agent moves to the root, a second investigator starts for the full project. Two investigators serve overlapping but inconsistent views of the same repository, and the agent gets different (and contradictory) answers depending on which investigator handles each request.
+
+Three sub-problems:
+1. **Subdirectory start:** agent starts at `/a/b`, investigator built for `/a/b` — misses everything in `/a` outside of `/a/b`.
+2. **Parent-redirect:** if the agent later asks for `/a`, and an investigator is already running at `/a/b` (child), the coordinator used to spawn a second investigator at `/a` — now two conflict.
+3. **Child-upgrade:** if an investigator at `/a` is already running and the agent asks for `/a/b`, the child should transparently use the parent's full context.
+
+**Decision:** Three-layer resolution, each acting as a safety net for the one above:
+
+**Layer 1 — CLI `.suitcode/` walk-up (`suitcode/main.go`):**
+Before connecting to the coordinator, the CLI walks up from the requested `repoPath`'s *parent* looking for a `.suitcode/` directory at an ancestor. If found, `repoPath` is silently updated to the ancestor and three advisory lines are printed to stderr. This handles the most common case (second session starting in a subdirectory) without any coordinator involvement.
+
+**Layer 2 — Parent-redirect in the coordinator (`coordinator/registry.go`):**
+`GetOrSpawn` checks all running investigators for any whose path is a proper ancestor of the requested path. If found, that investigator is returned directly — no spawn, no wait. This is the safety net when Layer 1 doesn't apply (no `.suitcode/` at a parent, but an investigator is already running at a parent from an earlier call).
+
+**Layer 3 — Child-upgrade in the coordinator (`coordinator/registry.go`):**
+When starting a new investigator at path P, any running investigators at children of P are stopped first. A parent always supersedes its children. The parent investigator is then started fresh.
+
+**Key sub-decisions:**
+
+- **No `.suitcode/` migration on child-upgrade.** When a child investigator at `/a/b` is stopped and a parent investigator is started at `/a`, the `.suitcode/` directory at `/a/b` is left in place as historical data. A fresh `.suitcode/` is created at `/a`. Rationale: the child's analysis data is scoped to `/a/b` — merging it into `/a` would require rewriting all stored paths and risks partial-migration bugs. Starting fresh at `/a` is simpler, correct, and the re-warm cost is bounded (30–90 s).
+
+- **Always absolute paths at the CLI boundary.** All file path flags (`--path`, `--files`, `--log`) are resolved to absolute via `filepath.Abs` at the suitcode CLI process before being sent to the coordinator. This means the investigator always receives absolute paths and can resolve them correctly regardless of which directory the agent was in when it called suitcode. Git refs (`--from`) and relation names (`--relations`) are not file paths and are left unchanged.
+
+- **Walk-up starts from parent, not self.** `findSuitCodeRoot` walks from `filepath.Dir(repoPath)` upward, never checking `repoPath` itself. A `.suitcode/` at the exact requested directory is correct and does not trigger a redirect.
+
+**Rationale for the three-layer design:**
+- Layer 1 handles the common case before any network call, giving the agent an immediate advisory message.
+- Layer 2 handles concurrent agents at different levels within a single session.
+- Layer 3 ensures correctness when the path hierarchy evolves within a session (rare but possible).
+- Each layer is independent — if Layer 1 fires, Layers 2 and 3 are mostly no-ops.
+
+---
+
+## 12. Feedback system for measuring usefulness
 
 **Challenge:** No objective way to measure whether SuitCode context calls actually help agents write better code.
 
