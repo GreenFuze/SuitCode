@@ -16,23 +16,28 @@ const defaultContextBudget = 8_000
 // Scoring constants for context candidate ranking. Scores also determine tier
 // membership — see tierCriticalMin below.
 const (
-	scoreImportedBy = 0.90 // forward import: seed imports this package
-	scoreImporterOf = 0.80 // reverse import: this package imports the seed
-	scorePeer       = 0.75 // package peer: same compilation unit as seed
-	scoreTest       = 0.70 // package test: test files for the seed's package
+	scoreImportedBy        = 0.90 // forward import: seed imports this package
+	scoreImporterOf        = 0.80 // reverse import: production file that imports the seed
+	scorePeer              = 0.75 // package peer: same compilation unit as seed
+	scoreTest              = 0.70 // test file: tests for the seed or test-importer of seed
 )
 
 // tierCriticalMin is the minimum score for Tier-1 (critical path) candidates.
 //
-// Tier 1 (score ≥ 0.80 — seeds, direct imports, direct importers):
-//   These files have a direct dependency relationship with the seed.
+// Tier 1 (score ≥ 0.80 — seeds, direct imports, production importers):
+//   These files have a direct structural relationship with the seed.
 //   They are always included regardless of budget.
 //
-// Tier 2 (score < 0.80 — peers, test files):
-//   These files are coincident in the same compilation unit (peers) or serve
-//   as verification artifacts (tests). They are included only up to the budget
-//   remaining after Tier 1. When trimmed, a "contextual_trimmed" limitation
-//   reports the exact --budget value needed to include everything.
+// Tier 2 (score < 0.80 — peers, test files, test-importers):
+//   These files are coincident in the same compilation unit (peers), serve as
+//   verification artifacts (tests), or are test files that import the seed.
+//   Test-importers are demoted to scoreTest (0.70) even when discovered via
+//   FileImporters, because they rarely represent the structural callers that
+//   matter for understanding a production code change. Within Tier 2, peers
+//   (0.75) rank above test files (0.70), so structural co-residents are
+//   preferred when the remaining budget is limited.
+//   When trimmed, a "contextual_trimmed" limitation reports the exact
+//   --budget value needed to include all structurally related files.
 //
 // The boundary sits between scoreImporterOf (0.80) and scorePeer (0.75).
 const tierCriticalMin = scoreImporterOf
@@ -198,8 +203,17 @@ func RunContext(
 			score = scoreImportedBy
 			reason = "file is in a package directly imported by a seed"
 		case importerAbsPaths[f.Path]:
-			score = scoreImporterOf
-			reason = "file is in a package that directly imports a seed"
+			// Test files that happen to import the seed (e.g. unit tests for the
+			// seed's type) are contextual, not critical-path. Demoting them to
+			// scoreTest keeps Tier 1 clean for production structural callers, and
+			// lets peers (0.75) rank above test-importers (0.70) within Tier 2.
+			if f.Role == "test" {
+				score = scoreTest
+				reason = "test file that imports a seed (contextual tier — production importers are Tier 1)"
+			} else {
+				score = scoreImporterOf
+				reason = "file is in a package that directly imports a seed"
+			}
 		case peerAbsPaths[f.Path]:
 			score = scorePeer
 			reason = "file is in the same compilation unit as a seed"

@@ -436,7 +436,7 @@ func classifyFile(relPath, name, lang string) string {
 		return "vendor"
 	}
 
-	// Test files.
+	// Test files — Go, JS/TS, and Python conventions.
 	if strings.HasSuffix(lower, "_test.go") ||
 		strings.HasPrefix(name, "test_") ||
 		strings.HasSuffix(lower, ".test.ts") ||
@@ -447,6 +447,18 @@ func classifyFile(relPath, name, lang string) string {
 		strings.Contains(lower, "/tests/") ||
 		strings.Contains(lower, "/spec/") ||
 		strings.Contains(lower, "/__tests__/") {
+		return "test"
+	}
+
+	// C# test conventions.
+	//   Directory patterns: *.Tests/, *.Test/, *.Specs/, *.Spec/ (dotnet project naming)
+	//   File patterns: *Tests.cs, *Specs.cs (xUnit / NUnit / MSTest class naming)
+	if strings.Contains(lower, ".tests/") ||
+		strings.Contains(lower, ".test/") ||
+		strings.Contains(lower, ".specs/") ||
+		strings.Contains(lower, ".spec/") ||
+		strings.HasSuffix(lower, "tests.cs") ||
+		strings.HasSuffix(lower, "specs.cs") {
 		return "test"
 	}
 

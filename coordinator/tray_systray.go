@@ -384,8 +384,9 @@ func (m *trayMenu) handleCopyCallLog(s *projectSlot) {
 }
 
 // handleAnalyzeSession finds the most recent Claude Code session for the slot's
-// project, runs the session analysis, and saves an analysis pack to .suitcode/.
-// The result is logged; no user-visible dialog is shown on completion.
+// project, runs the session analysis, saves a pack to .suitcode/, and gives
+// the user visual feedback via a Windows balloon notification and a menu title
+// update that persists for 60 seconds.
 func (m *trayMenu) handleAnalyzeSession(s *projectSlot) {
 	s.mu.Lock()
 	info := s.projectInfo
@@ -395,14 +396,21 @@ func (m *trayMenu) handleAnalyzeSession(s *projectSlot) {
 		return
 	}
 
+	// Mark the menu item as "working..." while the analysis runs.
+	s.mAnalyzeSession.SetTitle("Analyze Last Session — working...")
+
 	// Find the most recent session file for this project.
 	sessions, err := sessionanalysis.FindSessionFiles(info.ProjectPath)
 	if err != nil {
 		logf("tray: analyze session: find sessions: %v", err)
+		s.mAnalyzeSession.SetTitle("Analyze Last Session — no sessions found")
+		go resetMenuItemTitle(s.mAnalyzeSession, "Analyze Last Session", 30*time.Second)
 		return
 	}
 	if len(sessions) == 0 {
 		logf("tray: analyze session: no Claude Code session files found for %s", info.ProjectPath)
+		s.mAnalyzeSession.SetTitle("Analyze Last Session — no sessions found")
+		go resetMenuItemTitle(s.mAnalyzeSession, "Analyze Last Session", 30*time.Second)
 		return
 	}
 
@@ -413,17 +421,88 @@ func (m *trayMenu) handleAnalyzeSession(s *projectSlot) {
 	pack, err := sessionanalysis.AnalyzeSession(sf, info.ProjectPath)
 	if err != nil {
 		logf("tray: analyze session: %v", err)
+		s.mAnalyzeSession.SetTitle("Analyze Last Session — failed")
+		go resetMenuItemTitle(s.mAnalyzeSession, "Analyze Last Session", 30*time.Second)
 		return
 	}
 
 	savedPath, err := sessionanalysis.SaveAnalysisPack(pack, info.ProjectPath)
 	if err != nil {
 		logf("tray: analyze session: save pack: %v", err)
-		return
 	}
 
 	logf("tray: analyze session: %d suitcode call(s) found · %d total turns · saved to %s",
 		pack.SuitcodeCallsFound, pack.TotalTurns, savedPath)
+
+	// Update the menu item title with the result so the user sees it when they
+	// next open the tray, then reset to the default label after 60 seconds.
+	resultTitle := fmt.Sprintf("Analyze Last Session — %d calls (%s)",
+		pack.SuitcodeCallsFound, sf.ModTime.Format("15:04"))
+	s.mAnalyzeSession.SetTitle(resultTitle)
+	go resetMenuItemTitle(s.mAnalyzeSession, "Analyze Last Session", 60*time.Second)
+
+	// Show a Windows balloon notification for immediate visual feedback.
+	msg := fmt.Sprintf("Found %d suitcode call(s) · %d session turns · pack saved to .suitcode/",
+		pack.SuitcodeCallsFound, pack.TotalTurns)
+	go showWindowsBalloon("SuitCode — Session Analysis", msg)
+}
+
+// resetMenuItemTitle resets a menu item's title after a delay.
+// Called in a goroutine; does not need the slot mutex.
+func resetMenuItemTitle(item *systray.MenuItem, title string, delay time.Duration) {
+	time.Sleep(delay)
+	item.SetTitle(title)
+}
+
+// showWindowsBalloon shows a Windows balloon tip notification using a temporary
+// PowerShell script that creates a NotifyIcon, shows the balloon, then disposes.
+// Non-blocking: the script runs in a background goroutine and cleans up after itself.
+// On non-Windows platforms this is a no-op.
+func showWindowsBalloon(title, message string) {
+	if runtime.GOOS != "windows" {
+		return
+	}
+
+	// Use PowerShell single-quoted strings; title and message must not contain
+	// single quotes (our generated strings never do).
+	script := fmt.Sprintf(`
+Add-Type -AssemblyName System.Windows.Forms
+$n = New-Object System.Windows.Forms.NotifyIcon
+$n.Icon = [System.Drawing.SystemIcons]::Information
+$n.BalloonTipTitle = '%s'
+$n.BalloonTipText = '%s'
+$n.Visible = $true
+$n.ShowBalloonTip(5000)
+Start-Sleep -Seconds 6
+$n.Dispose()
+`, title, message)
+
+	f, err := os.CreateTemp("", "suitcode-balloon-*.ps1")
+	if err != nil {
+		logf("warn: tray: balloon: create temp: %v", err)
+		return
+	}
+
+	if _, err := f.WriteString(script); err != nil {
+		f.Close()
+		os.Remove(f.Name())
+		logf("warn: tray: balloon: write temp: %v", err)
+		return
+	}
+	f.Close()
+
+	// Run non-interactively; clean up the temp file when the script exits.
+	cmd := exec.Command("powershell", "-NonInteractive", "-WindowStyle", "Hidden", "-File", f.Name())
+	if err := cmd.Start(); err != nil {
+		os.Remove(f.Name())
+		logf("warn: tray: balloon: start powershell: %v", err)
+		return
+	}
+
+	go func() {
+		_ = cmd.Wait()
+		os.Remove(f.Name())
+	}()
 }
 
 // handleCopyAnalysisPack copies the most recently saved analysis pack to the
