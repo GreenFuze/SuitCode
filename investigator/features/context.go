@@ -232,11 +232,17 @@ func RunContext(
 	// ── Tiered budget gate ────────────────────────────────────────────────────
 	//
 	// Pre-compute Tier-1 total so we know how much budget Tier-2 can use.
+	// Also compute seed-only tokens — the hard floor below which no budget
+	// value can reduce response size (seeds are always included).
 
 	tier1Tokens := 0
+	seedOnlyTokens := 0
 	for _, c := range candidates {
 		if !c.isTier2 {
 			tier1Tokens += c.est.Tokens
+		}
+		if c.score >= 1.0 {
+			seedOnlyTokens += c.est.Tokens
 		}
 	}
 
@@ -312,13 +318,15 @@ func RunContext(
 	// ── Tier-aware limitations ────────────────────────────────────────────────
 
 	// Tier-1 over budget: informational only (files are still included).
+	// Include seed-only token count so callers know the hard floor — no budget
+	// value below seedOnlyTokens will reduce the response size.
 	if tier1Tokens > budget {
 		overagePct := int(float64(tier1Tokens-budget) / float64(budget) * 100)
 		resp.Limitations = append(resp.Limitations, provider.Limitation{
 			Kind: "critical_path_over_budget",
 			Message: fmt.Sprintf(
-				"critical path (seeds, imports, importers) is %d%% over budget: %d tokens (%d requested) — all %d critical-path files included",
-				overagePct, tier1Tokens, budget, criticalPathCount,
+				"critical path (seeds, imports, importers) is %d%% over budget: %d tokens (%d requested) — all %d critical-path files included; seeds alone require %d tokens (hard floor)",
+				overagePct, tier1Tokens, budget, criticalPathCount, seedOnlyTokens,
 			),
 		})
 	}
@@ -360,6 +368,7 @@ func RunContext(
 	resp.ContextualIncluded = contextualIncluded
 	resp.ContextualOmitted = tier2OmittedCount
 	resp.ContextualOmittedTokens = tier2OmittedTokens
+	resp.SeedOnlyTokens = seedOnlyTokens
 	if resp.BudgetForAll == 0 {
 		resp.BudgetForAll = totalCandidateTokens
 	}

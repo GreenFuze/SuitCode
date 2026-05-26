@@ -828,14 +828,19 @@ func newContextCmd(repoPath string) *cobra.Command {
 				switch {
 				case criticalOverBudget:
 					// Tier-1 alone exceeds budget — still all included.
+					// Show the seed-only floor so the caller knows the hard minimum.
 					overagePct := 0
 					if resp.Metrics.Budget.Requested > 0 {
 						overagePct = int(float64(resp.Metrics.Budget.Used-resp.Metrics.Budget.Requested) /
 							float64(resp.Metrics.Budget.Requested) * 100)
 					}
-					fmt.Printf("Context capsule: %d files · %d tok (%d%% over %d tok budget · critical path only)\n",
+					seedFloor := ""
+					if resp.SeedOnlyTokens > 0 && resp.SeedOnlyTokens < resp.Metrics.Budget.Used {
+						seedFloor = fmt.Sprintf(" · seeds floor: %d tok", resp.SeedOnlyTokens)
+					}
+					fmt.Printf("Context capsule: %d files · %d tok (%d%% over %d tok budget · critical path only%s)\n",
 						resp.FilesIncluded, resp.Metrics.Budget.Used,
-						overagePct, resp.Metrics.Budget.Requested)
+						overagePct, resp.Metrics.Budget.Requested, seedFloor)
 
 				case tier2Trimmed:
 					// Critical path fits; some peers/tests were omitted.
@@ -854,29 +859,14 @@ func newContextCmd(repoPath string) *cobra.Command {
 				}
 
 				// ── Per-file list ─────────────────────────────────────────────
+				//
+				// Each file is labelled with its relation to the seeds so that
+				// agents can immediately identify the most relevant files without
+				// reading all of them.
 
-				// Critical-path files first.
-				criticalPrinted := false
 				for _, f := range resp.Files {
-					if f.Score >= float64(tierCriticalMinForDisplay) {
-						if !criticalPrinted {
-							fmt.Printf("  [critical path: seeds · imports · importers]\n")
-							criticalPrinted = true
-						}
-						fmt.Printf("  %-8s %-6d tok  %s\n", f.Role, f.TokenEstimate, f.RelPath)
-					}
-				}
-
-				// Contextual files (peers/tests) included within budget.
-				contextualPrinted := false
-				for _, f := range resp.Files {
-					if f.Score < float64(tierCriticalMinForDisplay) {
-						if !contextualPrinted {
-							fmt.Printf("  [contextual: peers · tests]\n")
-							contextualPrinted = true
-						}
-						fmt.Printf("  %-8s %-6d tok  %s\n", f.Role, f.TokenEstimate, f.RelPath)
-					}
+					label := contextRelationLabel(f.Score)
+					fmt.Printf("  %-11s %-6d tok  %s\n", label, f.TokenEstimate, f.RelPath)
 				}
 
 				// Omitted tier-2 summary.
@@ -887,7 +877,7 @@ func newContextCmd(repoPath string) *cobra.Command {
 
 				// Read errors.
 				for _, r := range resp.Capsule.Rejections {
-					fmt.Printf("  error    %-6s      %s — %s\n", "", r.Candidate.File.RelPath, r.Reason)
+					fmt.Printf("  [error]     %-6s      %s — %s\n", "", r.Candidate.File.RelPath, r.Reason)
 				}
 			}, func() {
 				printCallLog("context", resp.BaseFeatureResponse, resp.FilesIncluded, resp.FilesConsidered, resp.CompressionRatio)
@@ -907,6 +897,30 @@ func newContextCmd(repoPath string) *cobra.Command {
 // tierCriticalMinForDisplay mirrors the feature-layer constant for CLI display logic.
 // Kept in sync with investigator/features/context.go tierCriticalMin = 0.80.
 const tierCriticalMinForDisplay = 0.80
+
+// contextRelationLabel converts a context score into a human-readable relation
+// label that describes a file's structural relationship to the seed files.
+// Labels are left-padded to 11 chars so columns line up in printf output.
+//
+//	[seed]      score == 1.0 — explicitly requested seed file
+//	[import]    score == 0.90 — file is in a package directly imported by a seed
+//	[importer]  score == 0.80 — file is in a package that directly imports a seed
+//	[peer]      score == 0.75 — file is in the same compilation unit as a seed
+//	[test]      score == 0.70 — test file for the seed's package
+func contextRelationLabel(score float64) string {
+	switch {
+	case score >= 1.0:
+		return "[seed]"
+	case score >= 0.90:
+		return "[import]"
+	case score >= tierCriticalMinForDisplay: // 0.80
+		return "[importer]"
+	case score >= 0.75:
+		return "[peer]"
+	default:
+		return "[test]"
+	}
+}
 
 func newFailureContextCmd(repoPath string) *cobra.Command {
 	var logPath string

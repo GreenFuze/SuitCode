@@ -124,6 +124,13 @@ type ContextResponse struct {
 	// related file. Use this value as --budget to get the full capsule.
 	BudgetForAll int `json:"budget_for_all"`
 
+	// SeedOnlyTokens is the token cost of the seed files alone (score == 1.0).
+	// This is the hard minimum budget — no value below this will reduce the
+	// response size, because seeds are always included regardless of budget.
+	// Useful when critical_path_over_budget fires and the caller wants to know
+	// the floor before retrying with a higher budget.
+	SeedOnlyTokens int `json:"seed_only_tokens"`
+
 	// EvidenceScanned is the token-equivalent of all candidates examined.
 	EvidenceScanned provider.TokenEstimate `json:"evidence_scanned"`
 	// EstimatedContextAvoided = EvidenceScanned - Capsule.TotalEstimate.
