@@ -11,6 +11,12 @@ type ContextRequest struct {
 	Symbols []string
 	// DiffRef, if set, uses changed files as additional seeds.
 	DiffRef string
+	// Relations restricts which structural relationship types are included.
+	// Valid values: "imports", "importers", "peers", "tests".
+	// An empty slice (the default) includes all relation types.
+	// Seeds are always included regardless of this filter.
+	// Example: []string{"imports","importers"} returns only the critical path.
+	Relations []string
 }
 
 // ContextFact is one piece of content included in the capsule.
@@ -100,6 +106,23 @@ type ContextResponse struct {
 	FilesConsidered int `json:"files_considered"`
 	FilesIncluded   int `json:"files_included"`
 	FilesExcluded   int `json:"files_excluded"`
+
+	// Tier breakdown — the context compiler separates structurally related files
+	// into two tiers. Tier 1 (critical path: seeds + direct imports + direct
+	// importers, score ≥ 0.80) is always included. Tier 2 (peers + test files,
+	// score < 0.80) is included up to the remaining budget after Tier 1.
+
+	// CriticalPathFiles is the number of Tier-1 files (always included).
+	CriticalPathFiles int `json:"critical_path_files"`
+	// ContextualIncluded is the number of Tier-2 files included within budget.
+	ContextualIncluded int `json:"contextual_included"`
+	// ContextualOmitted is the number of Tier-2 files trimmed due to budget.
+	ContextualOmitted int `json:"contextual_omitted"`
+	// ContextualOmittedTokens is the token cost of the omitted Tier-2 files.
+	ContextualOmittedTokens int `json:"contextual_omitted_tokens"`
+	// BudgetForAll is the total tokens required to include every structurally
+	// related file. Use this value as --budget to get the full capsule.
+	BudgetForAll int `json:"budget_for_all"`
 
 	// EvidenceScanned is the token-equivalent of all candidates examined.
 	EvidenceScanned provider.TokenEstimate `json:"evidence_scanned"`

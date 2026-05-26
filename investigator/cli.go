@@ -402,6 +402,7 @@ func newContextCmd(repoPath string) *cobra.Command {
 	var from string
 	var budget int
 	var format string
+	var relations string
 
 	cmd := &cobra.Command{
 		Use:   "context",
@@ -427,6 +428,9 @@ func newContextCmd(repoPath string) *cobra.Command {
 			}
 			if files != "" {
 				req.Files = splitComma(files)
+			}
+			if relations != "" {
+				req.Relations = splitComma(relations)
 			}
 
 			resp, err := inv.Context(cmd.Context(), req)
@@ -459,6 +463,7 @@ func newContextCmd(repoPath string) *cobra.Command {
 	cmd.Flags().StringVar(&from, "from", "", "git ref: use changed files as seeds")
 	cmd.Flags().IntVar(&budget, "budget", 8000, "maximum estimated token budget")
 	cmd.Flags().StringVar(&format, "format", "", "output format: markdown or json (default: brief summary)")
+	cmd.Flags().StringVar(&relations, "relations", "", "comma-separated relation types to include: imports,importers,peers,tests (default: all)")
 	return cmd
 }
 

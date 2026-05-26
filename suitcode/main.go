@@ -764,6 +764,7 @@ func newContextCmd(repoPath string) *cobra.Command {
 	var from string
 	var budget int
 	var format string
+	var relations string
 
 	cmd := &cobra.Command{
 		Use:   "context",
@@ -789,6 +790,9 @@ func newContextCmd(repoPath string) *cobra.Command {
 			if files != "" {
 				req.Files = splitComma(files)
 			}
+			if relations != "" {
+				req.Relations = splitComma(relations)
+			}
 
 			stopFeature := logProgress("compiling context capsule...")
 			resp, err := client.Context(cmd.Context(), req)
@@ -800,37 +804,88 @@ func newContextCmd(repoPath string) *cobra.Command {
 			return printFeatureResult(resp, format, func(resp *cfeatures.ContextResponse) {
 				printProgress(resp.BaseFeatureResponse)
 
-				// Check whether the structurally-related set exceeds the budget.
-				overBudget := false
+				// ── Summary line ──────────────────────────────────────────────
+				//
+				// Four cases based on tier outcomes:
+				//   a) critical path over budget (tier1 > budget) — no tier2 at all
+				//   b) tier2 trimmed (some contextual files omitted)
+				//   c) everything fits (no trimming)
+				//   d) budget exactly matched (edge case, treated as c)
+
+				criticalOverBudget := false
+				tier2Trimmed := false
 				for _, lim := range resp.Limitations {
-					if lim.Kind == "over_budget" {
-						overBudget = true
-						break
+					switch lim.Kind {
+					case "critical_path_over_budget":
+						criticalOverBudget = true
+					case "contextual_trimmed":
+						tier2Trimmed = true
 					}
 				}
 
-				if overBudget {
-					overage := resp.Metrics.Budget.Used - resp.Metrics.Budget.Requested
+				switch {
+				case criticalOverBudget:
+					// Tier-1 alone exceeds budget — still all included.
 					overagePct := 0
 					if resp.Metrics.Budget.Requested > 0 {
-						overagePct = int(float64(overage) / float64(resp.Metrics.Budget.Requested) * 100)
+						overagePct = int(float64(resp.Metrics.Budget.Used-resp.Metrics.Budget.Requested) /
+							float64(resp.Metrics.Budget.Requested) * 100)
 					}
-					fmt.Printf("Context capsule: %d files · %d tokens (%d%% over %d token budget — all structurally related files included)\n",
-						resp.FilesIncluded, resp.Metrics.Budget.Used, overagePct, resp.Metrics.Budget.Requested)
-				} else {
+					fmt.Printf("Context capsule: %d files · %d tok (%d%% over %d tok budget · critical path only)\n",
+						resp.FilesIncluded, resp.Metrics.Budget.Used,
+						overagePct, resp.Metrics.Budget.Requested)
+
+				case tier2Trimmed:
+					// Critical path fits; some peers/tests were omitted.
+					fmt.Printf("Context capsule: %d/%d files · %d/%d tok"+
+						" — %d peer/test file(s) omitted · use --budget %d for all\n",
+						resp.FilesIncluded, resp.FilesConsidered,
+						resp.Metrics.Budget.Used, resp.Metrics.Budget.Requested,
+						resp.ContextualOmitted, resp.BudgetForAll)
+
+				default:
+					// Everything fits within budget.
 					saved := int((1 - resp.CompressionRatio) * 100)
-					fmt.Printf("Context capsule: %d files · %d/%d tokens (%d%% saved)\n",
-						resp.FilesIncluded, resp.Metrics.Budget.Used, resp.Metrics.Budget.Requested, saved)
+					fmt.Printf("Context capsule: %d files · %d/%d tok (%d%% saved)\n",
+						resp.FilesIncluded, resp.Metrics.Budget.Used,
+						resp.Metrics.Budget.Requested, saved)
 				}
 
-				// Print per-file inclusion summary so agents can verify capsule contents.
+				// ── Per-file list ─────────────────────────────────────────────
+
+				// Critical-path files first.
+				criticalPrinted := false
 				for _, f := range resp.Files {
-					fmt.Printf("  %-8s %-6d tok  %s\n", f.Role, f.TokenEstimate, f.RelPath)
+					if f.Score >= float64(tierCriticalMinForDisplay) {
+						if !criticalPrinted {
+							fmt.Printf("  [critical path: seeds · imports · importers]\n")
+							criticalPrinted = true
+						}
+						fmt.Printf("  %-8s %-6d tok  %s\n", f.Role, f.TokenEstimate, f.RelPath)
+					}
 				}
 
-				// Print rejected files (read errors only — no budget rejections now).
+				// Contextual files (peers/tests) included within budget.
+				contextualPrinted := false
+				for _, f := range resp.Files {
+					if f.Score < float64(tierCriticalMinForDisplay) {
+						if !contextualPrinted {
+							fmt.Printf("  [contextual: peers · tests]\n")
+							contextualPrinted = true
+						}
+						fmt.Printf("  %-8s %-6d tok  %s\n", f.Role, f.TokenEstimate, f.RelPath)
+					}
+				}
+
+				// Omitted tier-2 summary.
+				if resp.ContextualOmitted > 0 {
+					fmt.Printf("  [%d peer/test file(s) omitted · %d tok · use --budget %d for all]\n",
+						resp.ContextualOmitted, resp.ContextualOmittedTokens, resp.BudgetForAll)
+				}
+
+				// Read errors.
 				for _, r := range resp.Capsule.Rejections {
-					fmt.Printf("  error                 %s — %s\n", r.Candidate.File.RelPath, r.Reason)
+					fmt.Printf("  error    %-6s      %s — %s\n", "", r.Candidate.File.RelPath, r.Reason)
 				}
 			}, func() {
 				printCallLog("context", resp.BaseFeatureResponse, resp.FilesIncluded, resp.FilesConsidered, resp.CompressionRatio)
@@ -842,8 +897,14 @@ func newContextCmd(repoPath string) *cobra.Command {
 	cmd.Flags().StringVar(&from, "from", "", "git ref: use changed files as seeds")
 	cmd.Flags().IntVar(&budget, "budget", 8000, "maximum estimated token budget")
 	cmd.Flags().StringVar(&format, "format", "", "output format: json (default: brief summary)")
+	cmd.Flags().StringVar(&relations, "relations", "",
+		"comma-separated relation types: imports,importers,peers,tests (default: all)")
 	return cmd
 }
+
+// tierCriticalMinForDisplay mirrors the feature-layer constant for CLI display logic.
+// Kept in sync with investigator/features/context.go tierCriticalMin = 0.80.
+const tierCriticalMinForDisplay = 0.80
 
 func newFailureContextCmd(repoPath string) *cobra.Command {
 	var logPath string
