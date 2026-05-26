@@ -65,9 +65,15 @@ SETUP (first time on a new machine):
     suitcode installdeps --yes  # non-interactive (CI / scripted setup)
 
 WORKFLOW:
+  Always run suitcode from your project's root directory. Running from a
+  subdirectory limits analysis to that subtree. SuitCode will automatically
+  detect an existing .suitcode/ at a parent and redirect there, but starting
+  from the root avoids surprises.
+
   Run "warmup" once at the start of a session to load the import graph and
-  start gopls. All other commands work without it, but return richer results
-  once the investigator is fully initialized (~30–90 s on first run).
+  start language servers. All other commands work without it, but return
+  richer results once the investigator is fully initialized (~30–90 s on
+  first run).
 
     suitcode . warmup
 
@@ -284,6 +290,19 @@ func main() {
 		os.Exit(1)
 	}
 
+	// ── .suitcode/ root detection ─────────────────────────────────────────────
+	//
+	// Walk up from repoPath looking for a .suitcode/ directory at an ancestor.
+	// If found, use that ancestor as the project root so the investigator has
+	// full analysis scope, avoiding child-upgrade churn at the coordinator.
+	// A message is printed to stderr so the agent knows the redirect happened.
+	if suitRoot := findSuitCodeRoot(repoPath); suitRoot != "" {
+		logf("note: found .suitcode/ at %s — using it as project root", suitRoot)
+		logf("      invoked from subdirectory: %s", repoPath)
+		logf("      tip: always run suitcode from the project root for full analysis")
+		repoPath = suitRoot
+	}
+
 	// ── Subdirectory warning ──────────────────────────────────────────────────
 	//
 	// Walk up the directory tree looking for a .git directory. If one is found
@@ -306,6 +325,7 @@ func main() {
 	cmd := newRootCmd(repoPath)
 	if err := cmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		fmt.Fprintln(os.Stderr, "Run 'suitcode --help' to see all available commands.")
 		os.Exit(1)
 	}
 }
@@ -520,6 +540,10 @@ func newExplainFileCmd(repoPath string) *cobra.Command {
 				return fmt.Errorf("--path is required (or pass the file path as a positional argument, e.g. explain-file src/Foo.cs)")
 			}
 
+			// Always send absolute paths so the investigator resolves them
+			// correctly regardless of the agent's working directory.
+			path = absPath(path)
+
 			stopCoord := logProgress("connecting to coordinator...")
 			client, err := readyClient(repoPath)
 			stopCoord()
@@ -572,6 +596,8 @@ func newSymbolsCmd(repoPath string) *cobra.Command {
 			if path == "" {
 				return fmt.Errorf("--path is required (or pass the file path as a positional argument, e.g. symbols src/Foo.cs)")
 			}
+
+			path = absPath(path)
 
 			stopCoord := logProgress("connecting to coordinator...")
 			client, err := readyClient(repoPath)
@@ -691,6 +717,8 @@ func newRelatedCmd(repoPath string) *cobra.Command {
 				return fmt.Errorf("--path is required")
 			}
 
+			path = absPath(path)
+
 			stopCoord := logProgress("connecting to coordinator...")
 			client, err := readyClient(repoPath)
 			stopCoord()
@@ -737,6 +765,9 @@ func newTestsCmd(repoPath string) *cobra.Command {
 		Use:   "tests",
 		Short: "Find tests relevant to a source file or change",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Resolve file path to absolute when provided (--from is a git ref, not a path).
+			path = absPath(path)
+
 			stopCoord := logProgress("connecting to coordinator...")
 			client, err := readyClient(repoPath)
 			stopCoord()
@@ -803,7 +834,7 @@ func newImpactCmd(repoPath string) *cobra.Command {
 				GitRef: from,
 			}
 			if files != "" {
-				req.FilePaths = splitComma(files)
+				req.FilePaths = absPathList(splitComma(files))
 			}
 
 			stopFeature := logProgress("computing blast radius...")
@@ -876,7 +907,7 @@ func newContextCmd(repoPath string) *cobra.Command {
 				DiffRef: from,
 			}
 			if files != "" {
-				req.Files = splitComma(files)
+				req.Files = absPathList(splitComma(files))
 			}
 			if relations != "" {
 				req.Relations = splitComma(relations)
@@ -1021,6 +1052,8 @@ func newFailureContextCmd(repoPath string) *cobra.Command {
 				return fmt.Errorf("--log is required")
 			}
 
+			logPath = absPath(logPath)
+
 			stopCoord := logProgress("connecting to coordinator...")
 			client, err := readyClient(repoPath)
 			stopCoord()
@@ -1085,7 +1118,7 @@ func newVerifyPlanCmd(repoPath string) *cobra.Command {
 				GitRef: from,
 			}
 			if files != "" {
-				req.FilePaths = splitComma(files)
+				req.FilePaths = absPathList(splitComma(files))
 			}
 
 			stopFeature := logProgress("generating verification plan...")
@@ -1461,6 +1494,53 @@ func findGitRoot(dir string) string {
 		}
 		dir = parent
 	}
+}
+
+// findSuitCodeRoot walks up from dir's parent looking for an ancestor that
+// contains a .suitcode/ directory. Returns the ancestor path if found, or ""
+// if no such ancestor exists.
+//
+// The search begins at the *parent* of dir so that a .suitcode/ at dir itself
+// does not trigger a redirect — we only redirect when the agent invoked
+// suitcode from a subdirectory of an existing project root.
+func findSuitCodeRoot(dir string) string {
+	current := filepath.Dir(dir)
+	for {
+		if _, err := os.Stat(filepath.Join(current, config.SuitCodeDir)); err == nil {
+			return current
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			// Reached the filesystem root without finding .suitcode/.
+			return ""
+		}
+		current = parent
+	}
+}
+
+// absPath resolves p to an absolute path using the process's current working
+// directory at invocation time. If p is already absolute or empty it is
+// returned unchanged. On resolution failure the original p is returned and a
+// warning is logged so the downstream tool can surface a meaningful error.
+func absPath(p string) string {
+	if p == "" || filepath.IsAbs(p) {
+		return p
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		logf("warn: cannot resolve %q to absolute path: %v", p, err)
+		return p
+	}
+	return abs
+}
+
+// absPathList resolves each element of paths to an absolute path. See absPath.
+func absPathList(paths []string) []string {
+	out := make([]string, len(paths))
+	for i, p := range paths {
+		out[i] = absPath(p)
+	}
+	return out
 }
 
 func splitComma(s string) []string {

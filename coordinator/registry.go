@@ -7,7 +7,9 @@ import (
 	"net"
 	"net/http"
 	"os/exec"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -70,29 +72,65 @@ func NewRegistry(invBinary, coordinatorURL string) *Registry {
 
 // GetOrSpawn returns the running investigator for projectPath, spawning one if
 // necessary. Waits until the investigator reports ReadinessLevel >= 1.
+//
+// Two path-resolution rules are applied before spawning:
+//
+//  1. Parent-redirect: if a running investigator already serves a parent of
+//     projectPath, that investigator is returned immediately. The parent has
+//     already indexed the full tree that contains projectPath.
+//
+//  2. Child-upgrade: if running investigators serve children of projectPath,
+//     they are stopped first. A parent investigator always supersedes children.
 func (r *Registry) GetOrSpawn(ctx context.Context, projectPath string) (*InvestigatorProcess, error) {
-	// Fast path: check if already running and healthy.
+	// ── Fast path: read lock only ─────────────────────────────────────────────
+	//
+	// Check exact match and parent-redirect without any writes.
 	r.mu.RLock()
-	proc, ok := r.processes[projectPath]
-	r.mu.RUnlock()
-
-	if ok && r.isHealthy(proc) {
+	if proc, ok := r.processes[projectPath]; ok && r.isHealthy(proc) {
+		r.mu.RUnlock()
 		return proc, nil
 	}
+	for path, proc := range r.processes {
+		if isAncestorPath(path, projectPath) && r.isHealthy(proc) {
+			r.mu.RUnlock()
+			logf("request for %s redirected to parent investigator at %s", projectPath, path)
+			return proc, nil
+		}
+	}
+	r.mu.RUnlock()
 
-	// Slow path: acquire write lock and spawn.
+	// ── Slow path: write lock ─────────────────────────────────────────────────
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// Double-check after lock upgrade — another goroutine may have spawned it.
-	proc, ok = r.processes[projectPath]
-	if ok && r.isHealthy(proc) {
+	// Re-check exact match (another goroutine may have spawned while we waited).
+	if proc, ok := r.processes[projectPath]; ok && r.isHealthy(proc) {
 		return proc, nil
 	}
+	// Re-check parent-redirect under write lock.
+	for path, proc := range r.processes {
+		if isAncestorPath(path, projectPath) && r.isHealthy(proc) {
+			logf("request for %s redirected to parent investigator at %s (write-lock check)", projectPath, path)
+			return proc, nil
+		}
+	}
 
-	// Evict the stale entry. Kill it if we own the process (Cmd != nil);
-	// reattached investigators (Cmd == nil) are simply de-registered.
-	if ok && proc != nil {
+	// Child-upgrade: stop any investigators running at children of projectPath.
+	// A parent investigator always supersedes its children.
+	for path, proc := range r.processes {
+		if isAncestorPath(projectPath, path) {
+			logf("stopping child investigator at %s (superseded by parent %s)", path, projectPath)
+			if proc.Cmd != nil && proc.Cmd.Process != nil {
+				_ = proc.Cmd.Process.Kill()
+			} else {
+				logf("deregistering reattached child investigator at %s", path)
+			}
+			delete(r.processes, path)
+		}
+	}
+
+	// Evict stale exact entry if present (unhealthy or dead process).
+	if proc, ok := r.processes[projectPath]; ok && proc != nil {
 		if proc.Cmd != nil && proc.Cmd.Process != nil {
 			logf("killing stale investigator for %s (port %d)", projectPath, proc.Port)
 			_ = proc.Cmd.Process.Kill()
@@ -120,15 +158,18 @@ func (r *Registry) GetOrSpawn(ctx context.Context, projectPath string) (*Investi
 
 // Warmup spawns the investigator and waits until it reaches ReadinessLevel3
 // (import graph loaded). Designed for user-initiated pre-warming before agent work.
+// The returned process may be at a parent path if parent-redirect was applied.
 func (r *Registry) Warmup(ctx context.Context, projectPath string) (*InvestigatorProcess, error) {
 	proc, err := r.GetOrSpawn(ctx, projectPath)
 	if err != nil {
 		return nil, err
 	}
 
-	logf("waiting for investigator at %s to reach level 3 (import graph)...", projectPath)
+	// Use the actual investigator path (may differ from projectPath on redirect).
+	effectivePath := proc.ProjectPath
+	logf("waiting for investigator at %s to reach level 3 (import graph)...", effectivePath)
 	if err := r.waitForReadiness(ctx, proc, 3, 5*time.Minute); err != nil {
-		return nil, fmt.Errorf("registry: investigator for %q warmup timed out: %w", projectPath, err)
+		return nil, fmt.Errorf("registry: investigator for %q warmup timed out: %w", effectivePath, err)
 	}
 
 	return proc, nil
@@ -309,6 +350,21 @@ func (r *Registry) readinessLevel(proc *InvestigatorProcess) (int, error) {
 	}
 
 	return body.ReadinessLevel, nil
+}
+
+// isAncestorPath reports whether ancestor is a proper parent (or grandparent,
+// etc.) of descendant in the filesystem hierarchy. Both paths must be clean
+// absolute paths. Uses filepath.Rel to handle platform separators correctly.
+//
+// Returns false when ancestor == descendant (not a *proper* ancestor).
+func isAncestorPath(ancestor, descendant string) bool {
+	rel, err := filepath.Rel(ancestor, descendant)
+	if err != nil {
+		return false
+	}
+	// filepath.Rel returns "." when the paths are equal, and a ".." prefixed
+	// string when ancestor is not a real ancestor of descendant.
+	return rel != "." && !strings.HasPrefix(rel, "..")
 }
 
 // allocFreePort asks the OS for a free TCP port by opening a listener at :0,
