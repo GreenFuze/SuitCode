@@ -134,6 +134,29 @@ func (p *GoLanguageProvider) WaitForGopls(ctx context.Context) bool {
 	}
 }
 
+// DaemonInfo returns information about the gopls subprocess managed by this
+// provider. Returns a not-running DaemonInfo when gopls has not started.
+func (p *GoLanguageProvider) DaemonInfo() provider.DaemonInfo {
+	p.mu.RLock()
+	client := p.gopls
+	p.mu.RUnlock()
+
+	if client == nil || !p.goplsReady.Load() {
+		info := provider.DaemonInfo{Name: "gopls", Running: false}
+		if p.goplsBinary != "" {
+			info.Binary = p.goplsBinary
+		}
+		return info
+	}
+
+	return provider.DaemonInfo{
+		Name:    "gopls",
+		Binary:  client.transport.BinaryPath(),
+		Running: client.transport.Running(),
+		PID:     client.transport.PID(),
+	}
+}
+
 // Close stops the gopls subprocess (if running) and releases resources.
 // Safe to call multiple times.
 func (p *GoLanguageProvider) Close() error {

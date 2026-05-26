@@ -5,10 +5,11 @@
 // heuristics such as `using` directive parsing are used. Avalonia .axaml ↔ .axaml.cs
 // code-behind pairs are linked as direct peers within the same project.
 //
-// When csharp-ls is installed, FileImporters uses LSP textDocument/references to
-// provide file-level (not project-level) reverse dependency data. When csharp-ls is
-// not available, FileImporters falls back to the .csproj <ProjectReference> graph
-// and records a Limitation so callers know the result is coarser than optimal.
+// csharp-ls (the Roslyn-based LSP server) is REQUIRED for FileImporters. If it is
+// not installed, FileImporters returns a "tool_not_available" Limitation and empty
+// data — it does NOT fall back to the coarse .csproj project-level graph, which
+// would flood callers with irrelevant files. Run "suitcode installdeps" to install
+// csharp-ls via "dotnet tool install --global csharp-ls".
 package csprovider
 
 import (
@@ -54,14 +55,26 @@ func NewCSHarpLanguageProvider(ctx context.Context, repoPath string) (*CSHarpLan
 
 	p := &CSHarpLanguageProvider{repoPath: repoPath}
 
-	// Attempt to start csharp-ls. Non-fatal if not installed or fails to initialize.
-	if bin, err := findCsharpLs(); err == nil {
+	// Attempt to start csharp-ls. If not installed or initialization fails,
+	// record a limitation so Status() surfaces the gap to operators and agents.
+	// FileImporters will return "tool_not_available" when lspClient is nil.
+	if bin, err := findCsharpLs(); err != nil {
+		p.limitations = append(p.limitations, provider.Limitation{
+			Kind:    "tool_not_available",
+			Message: "csharp-ls is not installed — FileImporters will return empty results. Run 'suitcode installdeps' to install it.",
+			Scope:   repoPath,
+		})
+	} else {
 		client := newCsharpLspClient(bin, repoPath)
-		if initErr := client.Initialize(ctx); initErr == nil {
+		if initErr := client.Initialize(ctx); initErr != nil {
+			p.limitations = append(p.limitations, provider.Limitation{
+				Kind:    "lsp_init_failed",
+				Message: fmt.Sprintf("csharp-ls failed to initialize: %v — FileImporters will return empty results.", initErr),
+				Scope:   repoPath,
+			})
+		} else {
 			p.lspClient = client
 		}
-		// If Initialize fails, log silently and continue without LSP.
-		// The provider still works via the .csproj fallback.
 	}
 
 	p.ensureLoaded()
@@ -131,6 +144,20 @@ func (p *CSHarpLanguageProvider) Close() error {
 		p.lspClient.Shutdown(context.Background())
 	}
 	return nil
+}
+
+// DaemonInfo returns information about the csharp-ls subprocess managed by
+// this provider. Returns a not-running DaemonInfo when csharp-ls is not available.
+func (p *CSHarpLanguageProvider) DaemonInfo() provider.DaemonInfo {
+	if p.lspClient == nil {
+		return provider.DaemonInfo{Name: "csharp-ls", Running: false}
+	}
+	return provider.DaemonInfo{
+		Name:    "csharp-ls",
+		Binary:  p.lspClient.transport.BinaryPath(),
+		Running: p.lspClient.transport.Running(),
+		PID:     p.lspClient.transport.PID(),
+	}
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -238,65 +265,57 @@ func (p *CSHarpLanguageProvider) GetPackageRefs(filePath string) []PackageRef {
 // FileImporters returns the absolute paths of files that reference exported
 // types defined in filePath.
 //
-// When csharp-ls is available: uses textDocument/references for file-level
-// precision — only files that actually reference a type in filePath.
+// Requires csharp-ls: uses textDocument/references for file-level precision —
+// only files that actually reference an exported type in filePath are returned.
 //
-// Fallback: returns files in projects that directly reference filePath's project
-// (project-level granularity) and records a Limitation to inform callers.
+// Fail-fast: if csharp-ls is not installed, returns empty data and a
+// "tool_not_available" Limitation. No .csproj project-level fallback is used —
+// that fallback returns every file in any referencing project (including
+// unrelated files like App.axaml, Program.cs, Themes/) and produces noisy,
+// misleading context. Run "suitcode installdeps" to install csharp-ls.
 func (p *CSHarpLanguageProvider) FileImporters(ctx context.Context, filePath string) (*provider.ProviderResult[[]string], error) {
 	start := time.Now()
 
+	// Fail fast when csharp-ls is not available.
+	if p.lspClient == nil {
+		return &provider.ProviderResult[[]string]{
+			Data: []string{},
+			Limitations: []provider.Limitation{{
+				Kind:    "tool_not_available",
+				Message: "csharp-ls is required for file-level importers but is not installed. Run 'suitcode installdeps' to install it via 'dotnet tool install --global csharp-ls'.",
+				Scope:   filePath,
+			}},
+			DurationMs: time.Since(start).Milliseconds(),
+		}, nil
+	}
+
 	// LSP path: file-level references via csharp-ls textDocument/references.
-	if p.lspClient != nil {
-		files, err := p.lspClient.FileReferences(ctx, filePath)
-		if err == nil {
-			return &provider.ProviderResult[[]string]{
-				Data: files,
-				Provenance: []provider.Provenance{{
-					SourceKind:      provider.SourceKindLSP,
-					SourceTool:      "csharp-ls:textDocument/references",
-					Authority:       provider.AuthorityVerified,
-					EvidenceSummary: fmt.Sprintf("csharp-ls references: files that reference exported types in %s", filePath),
-					EvidencePaths:   []string{filePath},
-				}},
-				DurationMs: time.Since(start).Milliseconds(),
-			}, nil
-		}
-		// Fall through to .csproj fallback on LSP error.
+	files, err := p.lspClient.FileReferences(ctx, filePath)
+	if err != nil {
+		// LSP error — return the error as a limitation, not as a Go error.
+		// No fallback: a failed LSP call does not justify returning the
+		// entire project's files (which would be far worse than nothing).
+		return &provider.ProviderResult[[]string]{
+			Data: []string{},
+			Limitations: []provider.Limitation{{
+				Kind:    "lsp_error",
+				Message: fmt.Sprintf("csharp-ls textDocument/references failed for %s: %v", filePath, err),
+				Scope:   filePath,
+			}},
+			DurationMs: time.Since(start).Milliseconds(),
+		}, nil
 	}
-
-	// Fallback: project-level (coarse — all files in referencing projects).
-	p.mu.RLock()
-	ready := p.ready
-	lims := copyLimitations(p.limitations)
-	var files []string
-	if ready {
-		files = p.importerFilesFor(filePath)
-	}
-	p.mu.RUnlock()
-
-	if !ready {
-		return notReadyResult[[]string](lims), nil
-	}
-
-	// Append a limitation so callers know this is project-level, not file-level.
-	lims = append(lims, provider.Limitation{
-		Kind:    "project_level_importers",
-		Message: "csharp-ls not available — importers are project-level (all files in referencing .csproj projects), not file-level. Run 'suitcode installdeps' to install csharp-ls for file-level importers.",
-		Scope:   filePath,
-	})
 
 	return &provider.ProviderResult[[]string]{
 		Data: files,
 		Provenance: []provider.Provenance{{
-			SourceKind:      provider.SourceKindManifest,
-			SourceTool:      "csproj-project-reference",
-			Authority:       provider.AuthorityDerived,
-			EvidenceSummary: fmt.Sprintf("<ProjectReference> graph: files in projects that reference the project containing %s", filePath),
+			SourceKind:      provider.SourceKindLSP,
+			SourceTool:      "csharp-ls:textDocument/references",
+			Authority:       provider.AuthorityVerified,
+			EvidenceSummary: fmt.Sprintf("csharp-ls references: files that reference exported types in %s", filePath),
 			EvidencePaths:   []string{filePath},
 		}},
-		Limitations: lims,
-		DurationMs:  time.Since(start).Milliseconds(),
+		DurationMs: time.Since(start).Milliseconds(),
 	}, nil
 }
 
@@ -382,20 +401,6 @@ func (p *CSHarpLanguageProvider) importedFilesFor(filePath string) []string {
 	result = append(result, p.idx.fileImports[filePath]...)
 
 	// Include the Avalonia code-behind partner (.axaml ↔ .axaml.cs) as a peer.
-	if partner, ok := p.idx.partners[filePath]; ok {
-		result = append(result, partner)
-	}
-	return dedup(result)
-}
-
-// importerFilesFor returns the deduplicated set of files that "import" filePath
-// (files in projects that reference its project), including its Avalonia partner.
-// Caller must hold p.mu.RLock.
-func (p *CSHarpLanguageProvider) importerFilesFor(filePath string) []string {
-	result := make([]string, 0, len(p.idx.fileImporters[filePath])+1)
-	result = append(result, p.idx.fileImporters[filePath]...)
-
-	// Include the Avalonia code-behind partner as a peer.
 	if partner, ok := p.idx.partners[filePath]; ok {
 		result = append(result, partner)
 	}

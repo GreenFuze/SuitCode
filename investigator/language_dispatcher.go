@@ -211,6 +211,27 @@ func (d *LanguageDispatcher) GetCSPackageRefs(filePath string) []csprovider.Pack
 	return d.csProvider.GetPackageRefs(filePath)
 }
 
+// GetDaemons returns DaemonInfo for all LSP subprocesses currently managed by
+// active language providers. Providers that have no daemon (JS/TS static AST,
+// Python static AST) are not represented. Nil providers are skipped.
+func (d *LanguageDispatcher) GetDaemons() []provider.DaemonInfo {
+	var daemons []provider.DaemonInfo
+
+	// Go provider → gopls.
+	if d.goProvider != nil {
+		daemons = append(daemons, d.goProvider.DaemonInfo())
+	}
+
+	// C# provider → csharp-ls.
+	if d.csProvider != nil {
+		daemons = append(daemons, d.csProvider.DaemonInfo())
+	}
+
+	// JS/TS and Python providers currently use static AST (no daemon).
+
+	return daemons
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // provider.Provider implementation
 // ──────────────────────────────────────────────────────────────────────────────

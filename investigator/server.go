@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	cfeatures "github.com/GreenFuze/SuitCode/core/features"
+	"github.com/GreenFuze/SuitCode/core/provider"
 )
 
 // Server wraps a ProjectInvestigator behind an HTTP API.
@@ -42,6 +43,7 @@ func NewServer(inv *ProjectInvestigator, port int, coordinatorURL string) *Serve
 
 	// Feature routes.
 	r.Get("/api/v1/health", s.handleHealth)
+	r.Get("/api/v1/status", s.handleStatus)
 	r.Post("/api/v1/repo-overview", s.handleRepoOverview)
 	r.Post("/api/v1/explain-file", s.handleExplainFile)
 	r.Post("/api/v1/related", s.handleRelated)
@@ -98,6 +100,25 @@ type investigatorHealthPayload struct {
 	Version        string `json:"version"`
 }
 
+// investigatorStatusProvider is one provider entry in the status payload.
+type investigatorStatusProvider struct {
+	ProviderID  string `json:"provider_id"`
+	DisplayName string `json:"display_name"`
+	Ready       bool   `json:"ready"`
+	Summary     string `json:"summary,omitempty"`
+}
+
+// investigatorStatusPayload is the body returned by GET /api/v1/status.
+type investigatorStatusPayload struct {
+	Repo           string                       `json:"repo"`
+	Readiness      int                          `json:"readiness_level"`
+	ReadinessDesc  string                       `json:"readiness_desc"`
+	Providers      []investigatorStatusProvider `json:"providers"`
+	Daemons        []provider.DaemonInfo        `json:"daemons"`
+	LastWarmedAt   string                       `json:"last_warmed_at,omitempty"`
+	WarmDurationMs int64                        `json:"warm_duration_ms,omitempty"`
+}
+
 // errorPayload is the body returned for any error response.
 type errorPayload struct {
 	Error string `json:"error"`
@@ -118,6 +139,37 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		ReadinessLevel: int(st.Readiness),
 		Version:        "v1",
 	})
+}
+
+// handleStatus returns the full investigator status including provider readiness
+// and daemon (LSP subprocess) information. Used by the tray and suitcode status.
+func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
+	st := s.inv.Status()
+
+	// Convert providers to the serialisable payload type.
+	providers := make([]investigatorStatusProvider, 0, len(st.Providers))
+	for _, p := range st.Providers {
+		providers = append(providers, investigatorStatusProvider{
+			ProviderID:  string(p.ProviderID),
+			DisplayName: p.DisplayName,
+			Ready:       p.Ready,
+			Summary:     p.Summary,
+		})
+	}
+
+	payload := investigatorStatusPayload{
+		Repo:          st.RepoPath,
+		Readiness:     int(st.Readiness),
+		ReadinessDesc: st.ReadinessDesc,
+		Providers:     providers,
+		Daemons:       st.Daemons,
+		WarmDurationMs: st.WarmDurationMs,
+	}
+	if st.LastWarmedAt != nil {
+		payload.LastWarmedAt = st.LastWarmedAt.Format(time.RFC3339)
+	}
+
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (s *Server) handleRepoOverview(w http.ResponseWriter, r *http.Request) {

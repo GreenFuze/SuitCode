@@ -62,6 +62,7 @@ type InvestigatorStatus struct {
 	Readiness      ReadinessLevel
 	ReadinessDesc  string
 	Providers      []ProviderStatus
+	Daemons        []provider.DaemonInfo // LSP subprocesses run by language providers
 	LastWarmedAt   *time.Time
 	WarmDurationMs int64
 }
@@ -312,6 +313,9 @@ func (inv *ProjectInvestigator) Status() InvestigatorStatus {
 			Summary:     "not ready (no .csproj files found)",
 		})
 	}
+
+	// Daemon info — LSP subprocesses run by language providers (gopls, csharp-ls).
+	status.Daemons = inv.langDispatcher.GetDaemons()
 
 	return status
 }

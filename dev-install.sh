@@ -73,9 +73,19 @@ echo ""
 
 if [ "$RESTART" -eq 1 ]; then
   echo "Restarting coordinator..."
-  pkill -x suitcode    2>/dev/null || true
-  pkill -x coordinator 2>/dev/null || true
-  pkill -x investigator 2>/dev/null || true
+
+  # Kill any running SuitCode processes. On Windows (Git Bash / MSYS) pkill
+  # does not exist or silently does nothing — use taskkill.exe instead.
+  if echo "$OS" | grep -qi "mingw\|msys\|cygwin\|windows"; then
+    taskkill.exe /F /IM suitcode.exe    2>/dev/null || true
+    taskkill.exe /F /IM coordinator.exe 2>/dev/null || true
+    taskkill.exe /F /IM investigator.exe 2>/dev/null || true
+  else
+    pkill -x suitcode    2>/dev/null || true
+    pkill -x coordinator 2>/dev/null || true
+    pkill -x investigator 2>/dev/null || true
+  fi
+
   sleep 0.5
   "$GOBIN/coordinator" &
   echo "  coordinator restarted from $GOBIN/coordinator"

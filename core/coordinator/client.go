@@ -55,6 +55,35 @@ type ProjectInfo struct {
 	StartedAt   string `json:"started_at"`
 }
 
+// DaemonInfo describes one LSP subprocess managed by a language provider.
+// Mirrors provider.DaemonInfo for cross-package JSON decoding.
+type DaemonInfo struct {
+	Name    string `json:"name"`
+	Binary  string `json:"binary,omitempty"`
+	Running bool   `json:"running"`
+	PID     int    `json:"pid,omitempty"`
+}
+
+// ProviderStatusInfo describes one provider in the investigator status.
+type ProviderStatusInfo struct {
+	ProviderID  string `json:"provider_id"`
+	DisplayName string `json:"display_name"`
+	Ready       bool   `json:"ready"`
+	Summary     string `json:"summary,omitempty"`
+}
+
+// InvestigatorStatus is returned by GET /api/v1/status on the investigator.
+// The coordinator proxies this endpoint transparently.
+type InvestigatorStatus struct {
+	Repo           string               `json:"repo"`
+	Readiness      int                  `json:"readiness_level"`
+	ReadinessDesc  string               `json:"readiness_desc"`
+	Providers      []ProviderStatusInfo `json:"providers"`
+	Daemons        []DaemonInfo         `json:"daemons"`
+	LastWarmedAt   string               `json:"last_warmed_at,omitempty"`
+	WarmDurationMs int64                `json:"warm_duration_ms,omitempty"`
+}
+
 // ProjectsResponse is the decoded body of GET /api/v1/projects.
 type ProjectsResponse struct {
 	Projects []ProjectInfo `json:"projects"`
@@ -213,6 +242,33 @@ func (c *Client) Warmup(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// GetStatus fetches the detailed status of the investigator for this client's
+// project, including provider readiness and daemon (LSP subprocess) information.
+// The coordinator transparently proxies this to the investigator.
+func (c *Client) GetStatus(ctx context.Context) (*InvestigatorStatus, error) {
+	url := c.coordinatorURL + "/api/v1/status"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("client: build status request: %w", err)
+	}
+	req.Header.Set("X-Suitcode-Project", c.projectPath)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("client: GET /api/v1/status: %w", err)
+	}
+	if resp.Body == nil {
+		return nil, fmt.Errorf("client: status: empty response body (status %d)", resp.StatusCode)
+	}
+	defer resp.Body.Close()
+
+	var result InvestigatorStatus
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("client: decode status: %w", err)
+	}
+	return &result, nil
 }
 
 // StopProject asks the coordinator to kill the investigator for the given

@@ -213,6 +213,30 @@ func (t *Transport) Stop() {
 	}
 }
 
+// PID returns the OS process ID of the running LSP subprocess, or 0 if the
+// process has not started or has already exited.
+func (t *Transport) PID() int {
+	if !t.started.Load() || t.closed.Load() {
+		return 0
+	}
+	if t.cmd.Process == nil {
+		return 0
+	}
+	return t.cmd.Process.Pid
+}
+
+// BinaryPath returns the resolved path to the LSP server binary that was
+// passed to NewTransport.
+func (t *Transport) BinaryPath() string {
+	return t.cmd.Path
+}
+
+// Running reports whether the subprocess is currently running (started and not
+// yet stopped or crashed).
+func (t *Transport) Running() bool {
+	return t.started.Load() && !t.closed.Load() && !t.crashed.Load()
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Internal helpers (called with mu held unless noted)
 // ──────────────────────────────────────────────────────────────────────────────

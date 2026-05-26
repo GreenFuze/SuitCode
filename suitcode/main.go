@@ -151,6 +151,10 @@ GLOBAL COMMANDS (no repo-path needed):
                    language. Run once on a new machine before warmup.
                      --yes   install without prompting (CI / scripted setup)
 
+  verifydeps       Check that all required LSP servers are installed without
+                   installing anything. Exits 0 if all tools are present,
+                   exits 1 if any are missing (suitable for CI health checks).
+
 OUTPUT:
   By default every command prints a one-line summary to stdout and emits
   timing/budget/hash diagnostics to stderr.
@@ -230,10 +234,11 @@ func main() {
 		os.Exit(0)
 	}
 
-	// installdeps is a global command that does not require a repo path.
-	// Handle it before the path parsing so it is always accessible.
-	if os.Args[1] == "installdeps" {
-		// Splice "installdeps" out and run it as a standalone cobra command.
+	// installdeps and verifydeps are global commands that do not require a repo path.
+	// Handle them before path parsing so they are always accessible.
+	if os.Args[1] == "installdeps" || os.Args[1] == "verifydeps" {
+		globalCmd := os.Args[1]
+		// Splice the global command name out so cobra sees [progname, flags...].
 		os.Args = append(os.Args[:1], os.Args[2:]...)
 		root := &cobra.Command{
 			Use:           "suitcode",
@@ -241,8 +246,9 @@ func main() {
 			SilenceErrors: true,
 		}
 		root.AddCommand(newInstallDepsCmd())
-		// Re-insert "installdeps" so cobra can find the subcommand.
-		os.Args = append([]string{os.Args[0], "installdeps"}, os.Args[1:]...)
+		root.AddCommand(newVerifyDepsCmd())
+		// Re-insert the global command so cobra can find the subcommand.
+		os.Args = append([]string{os.Args[0], globalCmd}, os.Args[1:]...)
 		if err := root.Execute(); err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
@@ -353,7 +359,7 @@ func newRootCmd(repoPath string) *cobra.Command {
 func newStatusCmd(repoPath string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
-		Short: "Show coordinator + investigator readiness status",
+		Short: "Show coordinator + investigator readiness and daemon status",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Ensure the coordinator is running before querying health.
 			stopCoord := logProgress("connecting to coordinator...")
@@ -374,6 +380,38 @@ func newStatusCmd(repoPath string) *cobra.Command {
 
 			fmt.Printf("Coordinator: OK (projects=%d)\n", health.Projects)
 			fmt.Printf("Project:     %s\n", repoPath)
+
+			// Try to get detailed investigator status (daemon info, provider readiness).
+			stopStatus := logProgress("fetching investigator status...")
+			invStatus, statusErr := client.GetStatus(cmd.Context())
+			stopStatus()
+			if statusErr == nil && invStatus != nil {
+				fmt.Printf("Readiness:   %s\n", invStatus.ReadinessDesc)
+
+				// Daemon info — show running LSP subprocesses.
+				if len(invStatus.Daemons) > 0 {
+					fmt.Println("Daemons:")
+					for _, d := range invStatus.Daemons {
+						if d.Running {
+							fmt.Printf("  ✓ %-20s running (pid=%d)\n", d.Name, d.PID)
+						} else {
+							fmt.Printf("  ✗ %-20s not running\n", d.Name)
+						}
+					}
+				}
+
+				// Provider summary — show any providers that are not ready.
+				notReady := 0
+				for _, p := range invStatus.Providers {
+					if !p.Ready {
+						notReady++
+					}
+				}
+				if notReady > 0 {
+					fmt.Printf("Providers:   %d not ready (run warmup)\n", notReady)
+				}
+			}
+
 			return nil
 		},
 	}
@@ -1574,5 +1612,61 @@ func runInstallDeps(yes bool) error {
 	if failed > 0 {
 		return fmt.Errorf("%d tool(s) failed to install", failed)
 	}
+	return nil
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// verifydeps — check-only version of installdeps
+// ──────────────────────────────────────────────────────────────────────────────
+
+// newVerifyDepsCmd returns a cobra command that checks whether all required LSP
+// servers are installed. Unlike installdeps, it never installs anything.
+// Exits 0 when all tools are present; exits 1 when any are missing.
+// Suitable for use in CI health checks before running agent sessions.
+func newVerifyDepsCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "verifydeps",
+		Short: "Check that all required LSP servers are installed (no installation)",
+		Long: `Checks whether each required LSP server is present in PATH or the
+language-specific tools directory. Does NOT install anything.
+
+Exits 0 when all required tools are present.
+Exits 1 when one or more tools are missing (prints which ones).
+
+Use this in CI or onboarding scripts to validate the environment:
+  suitcode verifydeps && echo "environment OK" || echo "run: suitcode installdeps"`,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return runVerifyDeps()
+		},
+	}
+}
+
+// runVerifyDeps checks each LSP tool and prints its status. Returns an error
+// (which causes exit 1) when any tool is missing.
+func runVerifyDeps() error {
+	fmt.Println("SuitCode dependency check (verify only — nothing will be installed)")
+	fmt.Println("────────────────────────────────────────────────────────────────────")
+
+	missing := 0
+
+	for _, tool := range lspTools {
+		// Check whether the tool is already installed.
+		checkCmd := exec.Command(tool.checkCmd, tool.checkArgs...) //nolint:gosec
+		if err := checkCmd.Run(); err == nil {
+			fmt.Printf("  ✓ %-40s installed\n", tool.name)
+		} else {
+			fmt.Printf("  ✗ %-40s NOT FOUND\n", tool.name)
+			missing++
+		}
+	}
+
+	fmt.Println("────────────────────────────────────────────────────────────────────")
+
+	if missing > 0 {
+		fmt.Printf("Missing: %d tool(s). Run 'suitcode installdeps' to install them.\n", missing)
+		return fmt.Errorf("%d required tool(s) are not installed", missing)
+	}
+
+	fmt.Println("All required tools are installed.")
 	return nil
 }

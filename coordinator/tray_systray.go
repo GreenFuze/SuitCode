@@ -147,6 +147,7 @@ type trayMenu struct {
 // projectSlot is one pre-allocated sub-menu entry for an active investigator.
 //
 //	[mParent  ] ← top-level item; hovering it reveals a fly-out sub-menu (▶)
+//	  [mDaemon0..3] ← disabled, "gopls: running (pid=1234)" etc.
 //	  [mCopyLog] ← "Copy Coordinator Log"
 //	  [mCopyMet] ← "Copy Metrics Summary"
 //	  [mCopyCall]← "Copy Call Log"
@@ -162,19 +163,25 @@ type trayMenu struct {
 // Fix applied in build(): add ALL sub-items first (mParent is still in the
 // root HMENU), then call mParent.Hide(). The child HMENU is already attached
 // and survives Hide/Show cycles correctly thereafter.
+//
+// maxDaemonItems is the maximum number of pre-allocated daemon info sub-items
+// per project slot. Covers gopls and csharp-ls plus 2 future language servers.
+const maxDaemonItems = 4
+
 type projectSlot struct {
-	mParent          *systray.MenuItem // top-level sub-menu trigger; title = project path
-	mCopyLog         *systray.MenuItem // sub-item: "Copy Coordinator Log"
-	mCopyMet         *systray.MenuItem // sub-item: "Copy Metrics Summary"
-	mCopyCall        *systray.MenuItem // sub-item: "Copy Call Log"
-	mAnalyzeSession  *systray.MenuItem // sub-item: "Analyze Last Session"
-	mCopyAnalysis    *systray.MenuItem // sub-item: "Copy Analysis Pack"
-	mCopyPackPath    *systray.MenuItem // sub-item: "Copy Pack Path"
-	mOpenDir         *systray.MenuItem // sub-item: "Open Project Folder"
-	mStop            *systray.MenuItem // sub-item: "Stop Investigator"
+	mParent          *systray.MenuItem   // top-level sub-menu trigger; title = project path
+	mDaemons         [maxDaemonItems]*systray.MenuItem // disabled daemon-status info items
+	mCopyLog         *systray.MenuItem   // sub-item: "Copy Coordinator Log"
+	mCopyMet         *systray.MenuItem   // sub-item: "Copy Metrics Summary"
+	mCopyCall        *systray.MenuItem   // sub-item: "Copy Call Log"
+	mAnalyzeSession  *systray.MenuItem   // sub-item: "Analyze Last Session"
+	mCopyAnalysis    *systray.MenuItem   // sub-item: "Copy Analysis Pack"
+	mCopyPackPath    *systray.MenuItem   // sub-item: "Copy Pack Path"
+	mOpenDir         *systray.MenuItem   // sub-item: "Open Project Folder"
+	mStop            *systray.MenuItem   // sub-item: "Stop Investigator"
 
 	mu          sync.Mutex
-	projectPath string           // empty when slot is hidden
+	projectPath string            // empty when slot is hidden
 	projectInfo coord.ProjectInfo // last polled state
 }
 
@@ -205,6 +212,17 @@ func (m *trayMenu) build() {
 
 		// Add sub-items while mParent is in the root HMENU — this is what
 		// makes convertToSubMenu's SetMenuItemInfo call succeed on Windows.
+
+		// Daemon info items (disabled — informational only): pre-allocated so they
+		// exist in the child HMENU before mParent.Hide() is called. Initially hidden.
+		var mDaemons [maxDaemonItems]*systray.MenuItem
+		for j := 0; j < maxDaemonItems; j++ {
+			item := mParent.AddSubMenuItem("", "LSP daemon status")
+			item.Disable()
+			item.Hide()
+			mDaemons[j] = item
+		}
+
 		mCopyLog        := mParent.AddSubMenuItem("Copy Coordinator Log", "Copy the coordinator log file to the clipboard")
 		mCopyMet        := mParent.AddSubMenuItem("Copy Metrics Summary", "Copy the condensed session summary (errors, warnings, latency) to the clipboard")
 		mCopyCall       := mParent.AddSubMenuItem("Copy Call Log", "Copy the per-call detail log with seeds and limitation kinds to the clipboard")
@@ -219,6 +237,7 @@ func (m *trayMenu) build() {
 
 		s := &projectSlot{
 			mParent:         mParent,
+			mDaemons:        mDaemons,
 			mCopyLog:        mCopyLog,
 			mCopyMet:        mCopyMet,
 			mCopyCall:       mCopyCall,
@@ -721,7 +740,37 @@ func (s *projectSlot) clearProject() {
 // hideAll hides the parent item, collapsing the entire sub-menu entry.
 // Thread-safe (systray ops are channel-based); does not need the slot mutex.
 func (s *projectSlot) hideAll() {
+	// Hide all daemon items first.
+	for _, m := range s.mDaemons {
+		if m != nil {
+			m.Hide()
+		}
+	}
 	s.mParent.Hide()
+}
+
+// setDaemonInfo updates the pre-allocated daemon info sub-items from the given
+// slice of daemon statuses. Items beyond len(daemons) are hidden.
+// Thread-safe (systray SetTitle/Show/Hide ops are channel-based).
+func (s *projectSlot) setDaemonInfo(daemons []coord.DaemonInfo) {
+	for i, m := range s.mDaemons {
+		if m == nil {
+			continue
+		}
+		if i < len(daemons) {
+			d := daemons[i]
+			var title string
+			if d.Running {
+				title = fmt.Sprintf("  daemon: %s — running (pid %d)", d.Name, d.PID)
+			} else {
+				title = fmt.Sprintf("  daemon: %s — not running (suitcode installdeps)", d.Name)
+			}
+			m.SetTitle(title)
+			m.Show()
+		} else {
+			m.Hide()
+		}
+	}
 }
 
 func (s *projectSlot) getProject() string {
@@ -795,6 +844,42 @@ func (p *trayPoller) poll() {
 	count := len(projectsResp.Projects)
 	p.menu.updateStatus(fmt.Sprintf("Coordinator: online | %d project(s)", count))
 	p.menu.updateProjects(projectsResp.Projects)
+
+	// Fetch daemon info for each active project and update the slot.
+	// We call the investigator directly via its port to avoid adding a project-
+	// path routing layer to the coordinator client for each slot.
+	for i, project := range projectsResp.Projects {
+		if i >= maxProjectSlots {
+			break
+		}
+		daemons := fetchInvestigatorDaemons(project.Port)
+		p.menu.slots[i].setDaemonInfo(daemons)
+	}
+}
+
+// fetchInvestigatorDaemons calls the investigator's /api/v1/status endpoint
+// directly via its port and returns the daemon list. Returns nil on error
+// (the tray will hide any pre-allocated daemon items).
+func fetchInvestigatorDaemons(port int) []coord.DaemonInfo {
+	if port <= 0 {
+		return nil
+	}
+
+	url := fmt.Sprintf("http://127.0.0.1:%d/api/v1/status", port)
+	httpClient := &http.Client{Timeout: 2 * time.Second}
+	resp, err := httpClient.Get(url)
+	if err != nil || resp.Body == nil {
+		return nil
+	}
+	defer resp.Body.Close()
+
+	var status struct {
+		Daemons []coord.DaemonInfo `json:"daemons"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&status) != nil {
+		return nil
+	}
+	return status.Daemons
 }
 
 // ── Clipboard & shell helpers ─────────────────────────────────────────────────

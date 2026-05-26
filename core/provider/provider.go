@@ -44,6 +44,17 @@ type Provider interface {
 	Close() error
 }
 
+// DaemonInfo describes a language server subprocess managed by a language
+// provider. Used by Status() to report the health of LSP backend processes
+// (gopls, csharp-ls, typescript-language-server, pylsp) to the operator
+// and the tray icon.
+type DaemonInfo struct {
+	Name    string `json:"name"`             // e.g. "gopls", "csharp-ls"
+	Binary  string `json:"binary,omitempty"` // resolved path to the binary
+	Running bool   `json:"running"`          // true if the subprocess is alive
+	PID     int    `json:"pid,omitempty"`    // OS process ID when running
+}
+
 // ProviderResult wraps typed provider output together with the evidence
 // quality metadata that every caller needs to reason about trust level.
 type ProviderResult[T any] struct {
