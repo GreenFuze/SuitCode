@@ -6,7 +6,7 @@
 
 **Your coding agent actually knows your codebase. Not guesses — knows.**
 
-> **Measured on a real 500-file C# codebase, 2-day session, 89 calls:**
+> **Measured on a real 500-file C# codebase, single 2-day session, 89 calls:**
 > 54% of context calls were directly followed by a code edit — rising to ~80% once the agent calibrated its usage.
 > Average context compression: **10–40×** (500-file repo → 12–15 files loaded).
 
@@ -41,14 +41,14 @@ SuitCode never returns a result it can't back with a verified signal. If the imp
 
 ## Real-world validation
 
-We ran SuitCode on a 2-day, 89-call Claude Code session building a cross-platform desktop app in C#. The session analysis showed:
+We ran SuitCode on a single 2-day, 89-call Claude Code session building a cross-platform desktop app in C#. The session analysis showed:
 
 - **~54% of feature calls directly preceded code edits** (adjusted for expected no-edit calls like warmup and metrics)
 - The **5 highest-signal calls each preceded 1–66 files being created or edited** within 2–5 turns
 - **Context quality was high** — the failure modes were tooling (PowerShell piping, warmup instability), not bad context
 - After agents calibrated to use `--output <file>` and appropriate budgets, the late-session edit rate reached ~4/5
 
-SuitCode includes a built-in session analysis tool that computes these signals automatically from your Claude Code session files — no manual instrumentation needed.
+This is one data point, not a large-scale study. SuitCode includes a built-in session analysis tool so you can measure your own sessions — no manual instrumentation needed.
 
 ---
 
