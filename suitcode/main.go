@@ -101,9 +101,9 @@ COMMANDS:
                      --path <file>  [required]
 
   symbols          Symbols defined in a specific file: functions, types,
-                   variables, constants. Uses gopls for Go, Roslyn for C#
-                   (when available). Returns a "not_implemented" limitation
-                   for languages without a symbol server.
+                   variables, constants. Uses gopls (Go) and csharp-ls
+                   (C#) for LSP-backed results. Returns a limitation for
+                   languages not yet integrated (JS/TS, Python).
                      --path <file>  [required]
                      --filter <pattern>  case-insensitive substring match
 
@@ -192,20 +192,43 @@ GLOBAL FLAGS:
                   created/truncated; its parent directory must already exist.
 
 EXAMPLES:
-  # Pre-warm once per coding session (do this first)
-  suitcode /path/to/repo warmup
+  # ── Session start ──────────────────────────────────────────────────────────
 
-  # Understand the overall repository structure
-  suitcode . repo-overview --format json
+  # Pre-warm once per coding session (always do this first)
+  suitcode . warmup
 
-  # Gather bounded context before editing a file
+  # ── Context gathering ─────────────────────────────────────────────────────
+
+  # Gather context before editing: full content, explicit budget
   suitcode . context --files internal/auth/token.go --budget 8000
 
-  # Gather context for everything changed since branching from main
-  suitcode . context --from main --budget 12000 --format json
+  # Let SuitCode pick the right budget automatically
+  suitcode . context --files internal/auth/token.go --budget auto --format json
+
+  # After session compaction: re-anchor to everything changed since main
+  suitcode . context --from main --budget auto --format json
+
+  # Compact outlines for a large file set (symbol names, ~10x token savings)
+  suitcode . context --files ViewModels/GameDetail.cs --depth signatures --format json
+
+  # Differential: full content for changed files, signatures for stable ones
+  suitcode . context --files ViewModels/GameDetail.cs --changed-since main --format json
+
+  # ── Understanding code ────────────────────────────────────────────────────
+
+  # High-level repository map
+  suitcode . repo-overview --format json
 
   # Explain what a specific file does
   suitcode . explain-file --path internal/auth/token.go --format json
+
+  # List symbols in a file (Go/C# use LSP; JS/TS/Python: limitation returned)
+  suitcode . symbols --path ViewModels/GameDetailViewModel.cs --format json
+
+  # Files most related to a seed (import graph proximity)
+  suitcode . related --path internal/auth/token.go --format json
+
+  # ── Testing ───────────────────────────────────────────────────────────────
 
   # Find tests to run after changing a file
   suitcode . tests --path internal/auth/token.go
@@ -213,14 +236,25 @@ EXAMPLES:
   # Find all tests affected by commits since main
   suitcode . tests --from main --format json
 
-  # Understand the blast radius of a set of changes
+  # ── Impact and verification ───────────────────────────────────────────────
+
+  # Blast radius: which files break if these change?
   suitcode . impact --files internal/auth/token.go,internal/auth/session.go
 
-  # Diagnose a failing CI run (save the log output to a file first)
+  # Diagnose a failing CI run (pipe log output to a file first)
   suitcode . failure-context --log /tmp/ci-failure.txt --format json
 
   # Generate a pre-PR verification checklist
   suitcode . verify-plan --from main --format json
+
+  # ── Session quality ───────────────────────────────────────────────────────
+
+  # Rate the last response (MANDATORY after every feature call)
+  suitcode . feedback good
+  suitcode . feedback bad
+
+  # Session analytics (compression ratio, helpful rate, latency)
+  suitcode . metrics summary
 
 Run 'suitcode <repo-path> <command> --help' for per-command flags.
 `
