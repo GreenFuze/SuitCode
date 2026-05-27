@@ -78,19 +78,31 @@ func RunContext(
 	}
 
 	// ── Seed resolution ───────────────────────────────────────────────────────
+	//
+	// Each entry in req.Files may be a file path OR a directory path.
+	// Directories are expanded to every indexed file they contain (recursive)
+	// so that "suitcode . context --files server" works as expected.
 
 	var seedRelPaths []string
+	seenSeeds := make(map[string]bool)
+
 	for _, f := range req.Files {
-		fsFile, err := findFile(listing, f, req.RepoPath)
+		fsFiles, err := findFilesOrDir(listing, f, req.RepoPath)
 		if err != nil {
 			resp.Limitations = append(resp.Limitations, provider.Limitation{
 				Kind:    "seed_file_not_found",
-				Message: fmt.Sprintf("seed file not found in index: %q", f),
+				Message: fmt.Sprintf("seed not found in index: %q — %v", f, err),
 				Scope:   f,
 			})
 			continue
 		}
-		seedRelPaths = append(seedRelPaths, fsFile.RelPath)
+		// Deduplicate: a directory seed might overlap with an explicit file seed.
+		for _, fsFile := range fsFiles {
+			if !seenSeeds[fsFile.RelPath] {
+				seenSeeds[fsFile.RelPath] = true
+				seedRelPaths = append(seedRelPaths, fsFile.RelPath)
+			}
+		}
 	}
 
 	if len(seedRelPaths) == 0 {

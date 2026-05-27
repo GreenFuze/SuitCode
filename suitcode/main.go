@@ -129,6 +129,8 @@ COMMANDS:
                      --budget <N|auto>         (default 8000; auto = all related files)
                      --depth <full|signatures> (default full; signatures ~5-15x fewer tokens)
                      --changed-since <git-ref> (full/sigs for changed; sigs-only for stable)
+                   --files accepts file paths OR directory paths. Directories are
+                   expanded to all indexed files they contain (e.g. --files server).
                    Tip: after session compaction use --from <ref> to re-seed from
                    recent changes, or --budget auto to skip budget guessing.
 

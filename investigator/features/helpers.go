@@ -146,7 +146,9 @@ func budgetOrDefault(b, defaultBudget int) int {
 // File-listing helpers
 // ──────────────────────────────────────────────────────────────────────────────
 
-// findFile locates a FileReference in the listing by absolute or relative path.
+// findFile locates a single FileReference in the listing by absolute or relative
+// path. Returns an error when the path is a directory — callers that want
+// directory expansion should use findFilesOrDir instead.
 func findFile(listing *provider.ProviderResult[provider.FilesystemListing], targetPath, repoPath string) (*provider.FilesystemFile, error) {
 	// Normalise the target path.
 	abs := targetPath
@@ -177,6 +179,56 @@ func findFile(listing *provider.ProviderResult[provider.FilesystemListing], targ
 		}
 	}
 	return nil, fmt.Errorf("file not found in repository index: %q", targetPath)
+}
+
+// findFilesOrDir resolves targetPath against the listing and returns all
+// matching indexed files.
+//
+// When targetPath is a file → returns a single-element slice (same as findFile).
+// When targetPath is a directory → returns ALL indexed files under that
+// directory tree (recursive). This lets --files accept directory seeds:
+// "suitcode . context --files server" expands to every indexed file under server/.
+//
+// Returns a non-nil error only when no indexed files are found at or under the
+// path (the path doesn't exist on disk, or the directory is empty / fully
+// excluded by .gitignore).
+func findFilesOrDir(
+	listing *provider.ProviderResult[provider.FilesystemListing],
+	targetPath, repoPath string,
+) ([]provider.FilesystemFile, error) {
+	// Normalise to absolute.
+	abs := targetPath
+	if !filepath.IsAbs(targetPath) {
+		abs = filepath.Join(repoPath, targetPath)
+	}
+
+	// Directory case: expand to all indexed files under the tree.
+	if info, statErr := os.Stat(abs); statErr == nil && info.IsDir() {
+		// dirPrefix is the absolute path with a trailing separator so that
+		// HasPrefix correctly matches direct and nested children.
+		dirPrefix := abs + string(filepath.Separator)
+
+		var found []provider.FilesystemFile
+		for _, f := range listing.Data.Files {
+			if strings.HasPrefix(f.Path, dirPrefix) {
+				found = append(found, f)
+			}
+		}
+		if len(found) == 0 {
+			return nil, fmt.Errorf(
+				"%q is a directory but contains no indexed files (may be excluded by .gitignore or contain no source files)",
+				targetPath,
+			)
+		}
+		return found, nil
+	}
+
+	// File (or not-on-disk) case: single lookup.
+	f, err := findFile(listing, targetPath, repoPath)
+	if err != nil {
+		return nil, err
+	}
+	return []provider.FilesystemFile{*f}, nil
 }
 
 // fileToRef converts a FilesystemFile to a provider.FileReference.

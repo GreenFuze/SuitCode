@@ -38,9 +38,30 @@ func RunImpact(
 	}
 
 	// Resolve changed file list.
-	changedRelPaths := req.FilePaths
+	// When using --files (not --from), expand any directory entries so that
+	// "suitcode . impact --files server" includes all files under server/.
+	var changedRelPaths []string
 	if vcsResult != nil && req.GitRef != "" {
 		changedRelPaths = vcsResult.Data.ChangedFiles
+	} else {
+		seen := make(map[string]bool)
+		for _, p := range req.FilePaths {
+			expanded, err := findFilesOrDir(listing, p, req.RepoPath)
+			if err != nil {
+				// Treat unresolvable paths as-is (e.g. deleted files not in index).
+				if !seen[p] {
+					seen[p] = true
+					changedRelPaths = append(changedRelPaths, p)
+				}
+				continue
+			}
+			for _, f := range expanded {
+				if !seen[f.Path] {
+					seen[f.Path] = true
+					changedRelPaths = append(changedRelPaths, f.Path)
+				}
+			}
+		}
 	}
 
 	if len(changedRelPaths) == 0 {
