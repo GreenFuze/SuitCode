@@ -19,6 +19,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -125,9 +126,11 @@ COMMANDS:
                    command. Candidates are scored and ranked by relevance, then
                    trimmed to fit the budget.
                      --files <f1,f2,...>  or  --from <git-ref>  [one required]
-                     --budget <tokens>         (default 8000)
+                     --budget <N|auto>         (default 8000; auto = all related files)
                      --depth <full|signatures> (default full; signatures ~5-15x fewer tokens)
                      --changed-since <git-ref> (full/sigs for changed; sigs-only for stable)
+                   Tip: after session compaction use --from <ref> to re-seed from
+                   recent changes, or --budget auto to skip budget guessing.
 
   failure-context  Extract structured context from a build or test failure log:
                    suspected source files, test names, and a bounded context
@@ -883,7 +886,7 @@ func newImpactCmd(repoPath string) *cobra.Command {
 func newContextCmd(repoPath string) *cobra.Command {
 	var files string
 	var from string
-	var budget int
+	var budgetStr string
 	var format string
 	var relations string
 	var depth string
@@ -895,6 +898,12 @@ func newContextCmd(repoPath string) *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if files == "" && from == "" {
 				return fmt.Errorf("--files or --from is required")
+			}
+
+			// Parse budget: positive integer or "auto" (include all related files).
+			budget, autoMode, err := parseBudgetFlag(budgetStr)
+			if err != nil {
+				return fmt.Errorf("--budget: %w", err)
 			}
 
 			stopCoord := logProgress("connecting to coordinator...")
@@ -931,11 +940,11 @@ func newContextCmd(repoPath string) *cobra.Command {
 
 				// ── Summary line ──────────────────────────────────────────────
 				//
-				// Four cases based on tier outcomes:
-				//   a) critical path over budget (tier1 > budget) — no tier2 at all
+				// Cases based on tier outcomes and whether auto-budget was used:
+				//   a) critical path over budget (tier1 > budget) — all still included
 				//   b) tier2 trimmed (some contextual files omitted)
-				//   c) everything fits (no trimming)
-				//   d) budget exactly matched (edge case, treated as c)
+				//   c) auto mode — show actual token cost, not a ratio vs. max budget
+				//   d) everything fits (no trimming)
 
 				criticalOverBudget := false
 				tier2Trimmed := false
@@ -950,8 +959,9 @@ func newContextCmd(repoPath string) *cobra.Command {
 
 				switch {
 				case criticalOverBudget:
-					// Tier-1 alone exceeds budget — still all included.
-					// Show the seed-only floor so the caller knows the hard minimum.
+					// Tier-1 alone exceeds the explicit budget — still all included.
+					// Show the seed-only floor (hard minimum) and the exact budget
+					// needed to include all related files.
 					overagePct := 0
 					if resp.Metrics.Budget.Requested > 0 {
 						overagePct = int(float64(resp.Metrics.Budget.Used-resp.Metrics.Budget.Requested) /
@@ -961,9 +971,9 @@ func newContextCmd(repoPath string) *cobra.Command {
 					if resp.SeedOnlyTokens > 0 && resp.SeedOnlyTokens < resp.Metrics.Budget.Used {
 						seedFloor = fmt.Sprintf(" · seeds floor: %d tok", resp.SeedOnlyTokens)
 					}
-					fmt.Printf("Context capsule: %d files · %d tok (%d%% over %d tok budget · critical path only%s)\n",
+					fmt.Printf("Context capsule: %d files · %d tok (%d%% over %d tok budget · critical path only%s · use --budget %d for all)\n",
 						resp.FilesIncluded, resp.Metrics.Budget.Used,
-						overagePct, resp.Metrics.Budget.Requested, seedFloor)
+						overagePct, resp.Metrics.Budget.Requested, seedFloor, resp.BudgetForAll)
 
 				case tier2Trimmed:
 					// Critical path fits; some peers/tests were omitted.
@@ -973,8 +983,13 @@ func newContextCmd(repoPath string) *cobra.Command {
 						resp.Metrics.Budget.Used, resp.Metrics.Budget.Requested,
 						resp.ContextualOmitted, resp.BudgetForAll)
 
+				case autoMode:
+					// Auto-budget: show actual token cost without a misleading ratio.
+					fmt.Printf("Context capsule: %d files · %d tok (auto budget — all structurally related files)\n",
+						resp.FilesIncluded, resp.Metrics.Budget.Used)
+
 				default:
-					// Everything fits within budget.
+					// Everything fits within the explicit budget.
 					saved := int((1 - resp.CompressionRatio) * 100)
 					fmt.Printf("Context capsule: %d files · %d/%d tok (%d%% saved)\n",
 						resp.FilesIncluded, resp.Metrics.Budget.Used,
@@ -1013,8 +1028,11 @@ func newContextCmd(repoPath string) *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&files, "files", "", "comma-separated seed file paths")
-	cmd.Flags().StringVar(&from, "from", "", "git ref: use changed files as seeds")
-	cmd.Flags().IntVar(&budget, "budget", 8000, "maximum estimated token budget")
+	cmd.Flags().StringVar(&from, "from", "",
+		"git ref: use all files changed since ref as seeds (e.g. --from main, --from HEAD~5);"+
+			" ideal after session compaction to re-anchor context on recent changes")
+	cmd.Flags().StringVar(&budgetStr, "budget", "8000",
+		`token budget: positive integer (default 8000) or "auto" to include all structurally related files`)
 	cmd.Flags().StringVar(&format, "format", "", "output format: json (default: brief summary)")
 	cmd.Flags().StringVar(&relations, "relations", "",
 		"comma-separated relation types: imports,importers,peers,tests (default: all)")
@@ -1025,6 +1043,22 @@ func newContextCmd(repoPath string) *cobra.Command {
 		"git ref (e.g. main, HEAD~3): changed files get --depth content,"+
 			" unchanged files get signature-only outlines to save tokens")
 	return cmd
+}
+
+// parseBudgetFlag parses the --budget flag value.
+// Accepts a positive integer string or the literal "auto".
+// Returns (budget, autoMode, error).
+// "auto" sets budget to 999_999 — effectively unlimited for any real codebase —
+// so all structurally related files are included regardless of their token cost.
+func parseBudgetFlag(s string) (budget int, autoMode bool, err error) {
+	if s == "" || s == "auto" {
+		return 999_999, true, nil
+	}
+	n, convErr := strconv.Atoi(s)
+	if convErr != nil || n <= 0 {
+		return 0, false, fmt.Errorf("must be a positive integer or 'auto', got %q", s)
+	}
+	return n, false, nil
 }
 
 // tierCriticalMinForDisplay mirrors the feature-layer constant for CLI display logic.
