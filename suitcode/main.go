@@ -1033,6 +1033,12 @@ func newContextCmd(repoPath string) *cobra.Command {
 					// Auto-budget: show actual token cost without a misleading ratio.
 					fmt.Printf("Context capsule: %d files · %d tok (auto budget — all structurally related files)\n",
 						resp.FilesIncluded, resp.Metrics.Budget.Used)
+					// Warn when the capsule exceeds a typical model context window.
+					// At this size, consuming all file content in one call is impractical;
+					// --depth signatures gives the same structural picture at ~10x lower cost.
+					if resp.Metrics.Budget.Used > 100_000 {
+						fmt.Printf("  ⚠ Large capsule — for orientation use --depth signatures (~10x fewer tokens)\n")
+					}
 
 				default:
 					// Everything fits within the explicit budget.
