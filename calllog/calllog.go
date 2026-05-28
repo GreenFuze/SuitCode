@@ -226,6 +226,47 @@ func (l *Logger) SetLastFeedback(feedback string) error {
 // Path returns the absolute path to the JSONL file.
 func (l *Logger) Path() string { return l.path }
 
+// featureFeatures is the set of feature names that produce content responses
+// and therefore require a feedback rating. Warmup, status, metrics, feedback
+// itself, and other housekeeping calls are excluded.
+var featureFeatures = map[string]bool{
+	"context":         true,
+	"explain-file":    true,
+	"impact":          true,
+	"verify-plan":     true,
+	"failure-context": true,
+	"repo-overview":   true,
+	"related":         true,
+	"tests":           true,
+	"symbols":         true,
+}
+
+// UnratedCount returns the number of content-producing feature calls at the
+// tail of the log that have not yet received a feedback rating. The count
+// resets to 0 after every rated call. Returns 0 when the log is empty or
+// the most recent feature call is already rated.
+func (l *Logger) UnratedCount() int {
+	records, err := l.LoadAll()
+	if err != nil || len(records) == 0 {
+		return 0
+	}
+
+	// Walk backwards from the most recent record, counting unrated feature calls
+	// until we hit a rated one or run out of records.
+	count := 0
+	for i := len(records) - 1; i >= 0; i-- {
+		r := records[i]
+		if !featureFeatures[r.Feature] {
+			continue // skip housekeeping records (warmup, status, etc.)
+		}
+		if r.Feedback != "" {
+			break // found a rated call — stop counting
+		}
+		count++
+	}
+	return count
+}
+
 // PrintSummary writes a human-readable tabular summary of the most recent
 // records to w. Pass last = 0 to show all records.
 func (l *Logger) PrintSummary(w io.Writer, last int) error {

@@ -126,7 +126,7 @@ COMMANDS:
                    command. Candidates are scored and ranked by relevance, then
                    trimmed to fit the budget.
                      --files <f1,f2,...>  or  --from <git-ref>  [one required]
-                     --budget <N|auto>         (default 8000; auto = all related files)
+                     --budget <N|auto>         (default auto = all structurally related files)
                      --depth <full|signatures> (default full; signatures ~5-15x fewer tokens)
                      --changed-since <git-ref> (full/sigs for changed; sigs-only for stable)
                    --files accepts file paths OR directory paths. Directories are
@@ -201,11 +201,11 @@ EXAMPLES:
 
   # ── Context gathering ─────────────────────────────────────────────────────
 
-  # Gather context before editing: full content, explicit budget
-  suitcode . context --files internal/auth/token.go --budget 8000
+  # Gather context before editing (auto budget includes all related files)
+  suitcode . context --files internal/auth/token.go --format json
 
-  # Let SuitCode pick the right budget automatically
-  suitcode . context --files internal/auth/token.go --budget auto --format json
+  # Orientation pass — symbol outlines only, much fewer tokens
+  suitcode . context --files internal/auth/token.go --depth signatures --format json
 
   # After session compaction: re-anchor to everything changed since main
   suitcode . context --from main --budget auto --format json
@@ -470,6 +470,16 @@ func newStatusCmd(repoPath string) *cobra.Command {
 				}
 				if notReady > 0 {
 					fmt.Printf("Providers:   %d not ready (run warmup)\n", notReady)
+				}
+			}
+
+			// Feedback compliance — count calls awaiting a rating.
+			// This is a local operation (reads the JSONL log); no daemon call needed.
+			if logger, logErr := calllog.New(repoPath); logErr == nil {
+				if unrated := logger.UnratedCount(); unrated > 0 {
+					fmt.Printf("Feedback:    %d call(s) unrated — run: suitcode . feedback good|bad\n", unrated)
+				} else {
+					fmt.Println("Feedback:    all calls rated")
 				}
 			}
 
@@ -1067,8 +1077,8 @@ func newContextCmd(repoPath string) *cobra.Command {
 	cmd.Flags().StringVar(&from, "from", "",
 		"git ref: use all files changed since ref as seeds (e.g. --from main, --from HEAD~5);"+
 			" ideal after session compaction to re-anchor context on recent changes")
-	cmd.Flags().StringVar(&budgetStr, "budget", "8000",
-		`token budget: positive integer (default 8000) or "auto" to include all structurally related files`)
+	cmd.Flags().StringVar(&budgetStr, "budget", "auto",
+		`token budget: positive integer or "auto" (default) to include all structurally related files`)
 	cmd.Flags().StringVar(&format, "format", "", "output format: json (default: brief summary)")
 	cmd.Flags().StringVar(&relations, "relations", "",
 		"comma-separated relation types: imports,importers,peers,tests (default: all)")
