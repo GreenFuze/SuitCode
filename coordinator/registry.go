@@ -149,8 +149,13 @@ func (r *Registry) GetOrSpawn(ctx context.Context, projectPath string) (*Investi
 	r.processes[projectPath] = proc
 
 	// Wait for at least Level1 readiness (VCS identity + file index).
-	if err := r.waitForReadiness(ctx, proc, 1, 30*time.Second); err != nil {
-		return nil, fmt.Errorf("registry: investigator for %q did not reach level 1: %w", projectPath, err)
+	// 120 s covers slow Windows startups (Defender scanning new binaries) and
+	// large repos where the initial git-status call can itself take 30-60 s.
+	if err := r.waitForReadiness(ctx, proc, 1, 120*time.Second); err != nil {
+		return nil, fmt.Errorf(
+			"investigator for %q is still initializing — run 'suitcode . warmup' again in a moment (the process is running; it may need more time on this machine): %w",
+			projectPath, err,
+		)
 	}
 
 	return proc, nil
@@ -324,7 +329,7 @@ func (r *Registry) waitForReadiness(ctx context.Context, proc *InvestigatorProce
 		}
 	}
 
-	return fmt.Errorf("timed out after %s waiting for level %d", timeout, minLevel)
+	return fmt.Errorf("timed out after %s waiting for level %d — the investigator is still running; run 'suitcode . warmup' again", timeout, minLevel)
 }
 
 // readinessLevel fetches the current readiness_level from the investigator.
