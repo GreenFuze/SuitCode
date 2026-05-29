@@ -159,6 +159,15 @@ COMMANDS:
                      (--last N, default 100). Shows advisory vs quality issues.
     export           Package the call log as a shareable zip
 
+  add-prompt       Write (or update) a SuitCode workflow block in the agent
+                   instruction file for this project. Idempotent: uses sentinel
+                   comments to replace the block on every run so the content
+                   stays in sync with the installed suitcode version. User
+                   content outside the sentinels is never touched.
+                     --agent claude|codex|all  (default: claude → CLAUDE.md)
+                   Run this once after setting up SuitCode on a new project.
+                   Run it again after upgrading to keep the block current.
+
 GLOBAL COMMANDS (no repo-path needed):
   installdeps      Detect and install required LSP servers for each supported
                    language. Run once on a new machine before warmup.
@@ -408,6 +417,7 @@ func newRootCmd(repoPath string) *cobra.Command {
 		newVerifyPlanCmd(repoPath),
 		newFeedbackCmd(repoPath),
 		newMetricsCmd(repoPath),
+		newAddPromptCmd(repoPath),
 	)
 
 	return root
@@ -1530,6 +1540,155 @@ func printCallLog(feature string, base cfeatures.BaseFeatureResponse, filesIn, f
 		line += fmt.Sprintf("  warn=%d", n)
 	}
 	logf("%s", line)
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// add-prompt
+// ──────────────────────────────────────────────────────────────────────────────
+
+func newAddPromptCmd(repoPath string) *cobra.Command {
+	var agent string
+
+	cmd := &cobra.Command{
+		Use:   "add-prompt",
+		Short: "Write (or update) a SuitCode workflow block in CLAUDE.md / AGENTS.md",
+		Long: `Writes a sentinel-bounded SuitCode workflow block into the agent instruction
+file for this project.
+
+- If the file does not exist it is created.
+- If it exists but has no block the block is appended.
+- If the sentinel block is already present it is replaced with the current version.
+
+User content outside the sentinels is never modified. Run this once after
+setting up SuitCode on a new project; run it again after upgrading suitcode to
+keep the block in sync with the installed version.`,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Resolve which files to write.
+			var targets []string
+			switch agent {
+			case "claude":
+				targets = []string{"CLAUDE.md"}
+			case "codex":
+				targets = []string{"AGENTS.md"}
+			case "all":
+				targets = []string{"CLAUDE.md", "AGENTS.md"}
+			default:
+				return fmt.Errorf("add-prompt: unknown --agent %q (use claude, codex, or all)", agent)
+			}
+
+			for _, f := range targets {
+				action, err := upsertPromptBlock(repoPath, f)
+				if err != nil {
+					return fmt.Errorf("add-prompt: %w", err)
+				}
+				switch action {
+				case "created":
+					fmt.Printf("✓ created   %s\n", f)
+				case "appended":
+					fmt.Printf("✓ appended  %s  — SuitCode block added\n", f)
+				case "updated":
+					fmt.Printf("✓ updated   %s  — SuitCode block replaced with current version\n", f)
+				}
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&agent, "agent", "claude",
+		`target agent instruction file: claude (CLAUDE.md), codex (AGENTS.md), or all`)
+	return cmd
+}
+
+// suitcodePromptBlock returns the SuitCode workflow block bounded by sentinel comments.
+// The sentinel delimiters allow upsertPromptBlock to reliably find and replace the
+// block on subsequent runs without touching user-written content.
+// Uses Go string concatenation to embed backtick characters inside the raw literal.
+func suitcodePromptBlock() string {
+	b := "`"
+	return `<!-- suitcode:start — managed by "suitcode . add-prompt"; run it again to update -->
+
+## SuitCode — mandatory workflow
+
+SuitCode provides authoritative import-graph intelligence for coding agents.
+Run ` + b + `suitcode --help` + b + ` for all commands.
+Run ` + b + `suitcode . <command> --help` + b + ` for per-command usage.
+
+**Non-negotiable steps:**
+
+1. **Session start** — run ` + b + `suitcode . warmup` + b + ` once before any other command.
+2. **Before reading or editing any code file** — run ` + b + `suitcode . context` + b + ` first.
+   Do not open files with Read/Grep/cat until you have run context on them.
+3. **After every feature call** — run ` + b + `suitcode . feedback good|bad` + b + `. Mandatory, no exceptions.
+   Run ` + b + `suitcode . status` + b + ` to see how many calls are still unrated.
+4. **After session compaction** — re-anchor with ` + b + `suitcode . context --from <ref>` + b + `.
+
+SuitCode output is the authoritative source. Use manual file reads only when SuitCode
+explicitly reports a limitation for that file.
+
+<!-- suitcode:end -->`
+}
+
+// upsertPromptBlock writes or replaces the suitcode sentinel block in the given file
+// inside repoPath. Returns the action taken: "created", "appended", or "updated".
+// User content outside the sentinel region is preserved exactly.
+func upsertPromptBlock(repoPath, filename string) (action string, err error) {
+	target := filepath.Join(repoPath, filename)
+
+	// Read existing content; tolerate a missing file.
+	data, readErr := os.ReadFile(target)
+	isNew := os.IsNotExist(readErr)
+	if readErr != nil && !isNew {
+		return "", fmt.Errorf("read %s: %w", filename, readErr)
+	}
+	existing := string(data)
+
+	const (
+		startSentinel = "<!-- suitcode:start"
+		endSentinel   = "<!-- suitcode:end -->"
+	)
+
+	block := suitcodePromptBlock()
+
+	startIdx := strings.Index(existing, startSentinel)
+	endIdx := strings.Index(existing, endSentinel)
+
+	var result string
+	if startIdx != -1 && endIdx != -1 && endIdx > startIdx {
+		// Sentinel block already present — replace it, preserving surrounding content.
+		action = "updated"
+		endOfBlock := endIdx + len(endSentinel)
+		// Consume the newline immediately after the closing sentinel so we
+		// don't accumulate blank lines on repeated runs.
+		if endOfBlock < len(existing) && existing[endOfBlock] == '\n' {
+			endOfBlock++
+		}
+		pre := strings.TrimRight(existing[:startIdx], "\n")
+		post := strings.TrimLeft(existing[endOfBlock:], "\n")
+
+		if pre != "" {
+			result = pre + "\n\n" + block + "\n"
+		} else {
+			result = block + "\n"
+		}
+		if post != "" {
+			result += "\n" + post
+		}
+	} else if isNew {
+		// No existing file — create it with just the block.
+		action = "created"
+		result = block + "\n"
+	} else {
+		// File exists but has no sentinel — append at the end.
+		action = "appended"
+		trimmed := strings.TrimRight(existing, "\n")
+		if trimmed == "" {
+			result = block + "\n"
+		} else {
+			result = trimmed + "\n\n" + block + "\n"
+		}
+	}
+
+	return action, os.WriteFile(target, []byte(result), 0o644)
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
