@@ -15,6 +15,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,6 +33,14 @@ import (
 )
 
 const defaultCoordinatorURL = "http://127.0.0.1:7878"
+
+// sourceDir is set at build time via:
+//
+//	go build -ldflags "-X main.sourceDir=/path/to/suitcode/source"
+//
+// The update command uses this to locate dev-install.sh and rebuild all binaries.
+// dev-install.sh passes this automatically when building from local source.
+var sourceDir string
 
 // logCalls is set by the --log-calls persistent flag. When true, every feature
 // call prints a compact one-line metric summary to stderr even when --format json
@@ -177,6 +186,13 @@ GLOBAL COMMANDS (no repo-path needed):
                    installing anything. Exits 0 if all tools are present,
                    exits 1 if any are missing (suitable for CI health checks).
 
+  update           Rebuild and reinstall all three SuitCode binaries from local
+                   source. Kills the running coordinator and investigators first,
+                   streams the build log to stdout, then restarts the coordinator.
+                   The source directory must be baked in at build time (dev-install.sh
+                   does this automatically) or passed via --source.
+                     --source <dir>   path to SuitCode source (overrides embedded path)
+
 OUTPUT:
   By default every command prints a one-line summary to stdout and emits
   timing/budget/hash diagnostics to stderr.
@@ -290,9 +306,8 @@ func main() {
 		os.Exit(0)
 	}
 
-	// installdeps and verifydeps are global commands that do not require a repo path.
-	// Handle them before path parsing so they are always accessible.
-	if os.Args[1] == "installdeps" || os.Args[1] == "verifydeps" {
+	// Global commands do not require a repo path — handle them before path parsing.
+	if os.Args[1] == "installdeps" || os.Args[1] == "verifydeps" || os.Args[1] == "update" {
 		globalCmd := os.Args[1]
 		// Splice the global command name out so cobra sees [progname, flags...].
 		os.Args = append(os.Args[:1], os.Args[2:]...)
@@ -303,6 +318,7 @@ func main() {
 		}
 		root.AddCommand(newInstallDepsCmd())
 		root.AddCommand(newVerifyDepsCmd())
+		root.AddCommand(newUpdateCmd())
 		// Re-insert the global command so cobra can find the subcommand.
 		os.Args = append([]string{os.Args[0], globalCmd}, os.Args[1:]...)
 		if err := root.Execute(); err != nil {
@@ -2009,5 +2025,251 @@ func runVerifyDeps() error {
 	}
 
 	fmt.Println("All required tools are installed.")
+	return nil
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// update — rebuild and reinstall from source
+// ──────────────────────────────────────────────────────────────────────────────
+
+func newUpdateCmd() *cobra.Command {
+	var src string
+
+	cmd := &cobra.Command{
+		Use:   "update",
+		Short: "Rebuild and reinstall SuitCode from source (kills running daemons first)",
+		Long: `Stops all running SuitCode processes (coordinator + investigators), rebuilds
+all three binaries from local source using 'go install', restarts the
+coordinator, and prints a live build log so you see exactly what ran.
+
+On Windows: suitcode.exe is renamed to suitcode.exe.old before the build so
+go install can write the new binary while this process is still running.
+The .old file is cleaned up automatically on the next run.
+
+The source directory must be embedded at build time:
+  go build -ldflags "-X main.sourceDir=/path/to/SuitCode" ./suitcode/
+
+dev-install.sh does this automatically.`,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			// Clean up any stale .old binary from a previous update (Windows only).
+			cleanOldBinary()
+			return runUpdate(src)
+		},
+	}
+
+	cmd.Flags().StringVar(&src, "source", sourceDir,
+		"path to SuitCode source repository (default: embedded at build time via -ldflags)")
+	return cmd
+}
+
+// cleanOldBinary removes suitcode.exe.old (Windows rename artifact) when present
+// next to the current executable. Safe to call on every startup.
+func cleanOldBinary() {
+	self, err := os.Executable()
+	if err != nil {
+		return
+	}
+	old := self + ".old"
+	if _, err := os.Stat(old); err == nil {
+		if removeErr := os.Remove(old); removeErr == nil {
+			logf("cleaned up stale binary: %s", old)
+		}
+	}
+}
+
+// runUpdate performs the full update sequence:
+//  1. Kill coordinator (and its child investigators) + any stale suitcode processes.
+//  2. On Windows: rename self to .old so go install can write a fresh binary.
+//  3. Run go install for all three packages (blocking, stdout/stderr piped here).
+//  4. Relaunch the coordinator in the background.
+func runUpdate(src string) error {
+	if src == "" {
+		return fmt.Errorf("update: source directory not set — build suitcode with:\n" +
+			"  go build -ldflags \"-X main.sourceDir=/path/to/SuitCode\" ./suitcode/\n" +
+			"  or use: suitcode update --source /path/to/SuitCode")
+	}
+
+	if _, err := os.Stat(src); err != nil {
+		return fmt.Errorf("update: source directory %q not found: %w", src, err)
+	}
+
+	fmt.Println("SuitCode update")
+	fmt.Println("═══════════════════════════════════════")
+	fmt.Printf("  Source: %s\n", src)
+	fmt.Println()
+
+	// ── Step 1: Stop running daemons ─────────────────────────────────────────
+	fmt.Println("→ Stopping running SuitCode processes...")
+	killSuitcodeProcesses()
+
+	fmt.Print("  Waiting for daemons to exit")
+	waitForCoordinatorDown(5 * time.Second)
+	fmt.Println(" — done")
+	fmt.Println()
+
+	// ── Step 2: On Windows, rename self so go install can write suitcode.exe ─
+	if runtime.GOOS == "windows" {
+		if self, err := os.Executable(); err == nil {
+			old := self + ".old"
+			_ = os.Remove(old) // remove any pre-existing stale .old
+			if err := os.Rename(self, old); err != nil {
+				logf("warn: could not rename suitcode.exe: %v — build may fail if locked", err)
+			} else {
+				fmt.Printf("  Renamed %s → suitcode.exe.old\n\n", filepath.Base(self))
+			}
+		}
+	}
+
+	// ── Step 3: Build all three binaries ─────────────────────────────────────
+	fmt.Println("→ Building (go install)...")
+	fmt.Println("───────────────────────────────────────")
+
+	if err := buildBinaries(src); err != nil {
+		return fmt.Errorf("update: build failed: %w", err)
+	}
+
+	fmt.Println("───────────────────────────────────────")
+	fmt.Println()
+
+	// ── Step 4: Restart coordinator ───────────────────────────────────────────
+	fmt.Println("→ Restarting coordinator...")
+	if err := relaunchCoordinator(); err != nil {
+		// Non-fatal: the binaries are updated; the user can start it manually.
+		fmt.Printf("  warn: could not restart coordinator: %v\n", err)
+		fmt.Println("  Run coordinator manually to start the tray icon.")
+	}
+
+	fmt.Println()
+	fmt.Println("✓ Update complete")
+	return nil
+}
+
+// killSuitcodeProcesses sends a force-kill signal to coordinator and investigator
+// processes. suitcode itself is the running process and will exit naturally
+// (or on Windows is renamed first so go install can replace it).
+func killSuitcodeProcesses() {
+	switch runtime.GOOS {
+	case "windows":
+		for _, name := range []string{"coordinator.exe", "investigator.exe"} {
+			cmd := exec.Command("taskkill", "/F", "/IM", name) //nolint:gosec
+			_ = cmd.Run()
+		}
+	default:
+		for _, name := range []string{"coordinator", "investigator"} {
+			cmd := exec.Command("pkill", "-x", name) //nolint:gosec
+			_ = cmd.Run()
+		}
+	}
+}
+
+// waitForCoordinatorDown polls the coordinator health endpoint until it stops
+// responding (meaning the process has exited), printing a dot per second.
+func waitForCoordinatorDown(timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	client := &http.Client{Timeout: 500 * time.Millisecond}
+	for time.Now().Before(deadline) {
+		resp, err := client.Get(defaultCoordinatorURL + "/api/v1/health")
+		if resp != nil && resp.Body != nil {
+			resp.Body.Close()
+		}
+		if err != nil {
+			return // coordinator is down
+		}
+		fmt.Print(".")
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+// buildBinaries runs go install for the suitcode, coordinator, and investigator
+// packages, streaming output to stdout/stderr so the user sees progress in real time.
+// The coordinator build requires -tags systray and on Windows -ldflags "-H windowsgui".
+func buildBinaries(src string) error {
+	// Helper: run one go install and stream its output.
+	goInstall := func(label string, args []string) error {
+		fmt.Printf("  go %s\n", strings.Join(args, " "))
+		cmd := exec.Command("go", args...) //nolint:gosec
+		cmd.Dir = src
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("%s: %w", label, err)
+		}
+		return nil
+	}
+
+	// suitcode — embed sourceDir so "suitcode update" works without --source
+	// after this build. On Windows the rename already freed up suitcode.exe.
+	suitcodeArgs := []string{
+		"install",
+		"-ldflags", "-X main.sourceDir=" + src,
+		"./suitcode/",
+	}
+	if err := goInstall("suitcode", suitcodeArgs); err != nil {
+		return err
+	}
+
+	// coordinator — requires -tags systray.
+	// On Windows: -H windowsgui suppresses the console window.
+	coordArgs := []string{"install", "-tags", "systray"}
+	if runtime.GOOS == "windows" {
+		coordArgs = append(coordArgs, "-ldflags", "-H windowsgui")
+	}
+	coordArgs = append(coordArgs, "./coordinator/")
+	if err := goInstall("coordinator", coordArgs); err != nil {
+		return err
+	}
+
+	// investigator — plain console binary.
+	if err := goInstall("investigator", []string{"install", "./investigator/"}); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// relaunchCoordinator starts the coordinator binary in the background.
+// The coordinator auto-restores the tray icon.
+func relaunchCoordinator() error {
+	// Try GOPATH/bin first (most common install location), then PATH.
+	gopath := os.Getenv("GOPATH")
+	if gopath == "" {
+		gopath = filepath.Join(os.Getenv("HOME"), "go")
+		if runtime.GOOS == "windows" {
+			gopath = filepath.Join(os.Getenv("USERPROFILE"), "go")
+		}
+	}
+
+	candidates := []string{
+		filepath.Join(gopath, "bin", "coordinator"),
+		filepath.Join(gopath, "bin", "coordinator.exe"),
+	}
+	if self, err := os.Executable(); err == nil {
+		candidates = append(candidates,
+			filepath.Join(filepath.Dir(self), "coordinator"),
+			filepath.Join(filepath.Dir(self), "coordinator.exe"),
+		)
+	}
+
+	var coordPath string
+	for _, c := range candidates {
+		if _, err := os.Stat(c); err == nil {
+			coordPath = c
+			break
+		}
+	}
+	if coordPath == "" {
+		var err error
+		coordPath, err = exec.LookPath("coordinator")
+		if err != nil {
+			return fmt.Errorf("coordinator binary not found in GOPATH/bin or PATH")
+		}
+	}
+
+	cmd := exec.Command(coordPath) //nolint:gosec
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start coordinator: %w", err)
+	}
+
+	fmt.Printf("  coordinator started (pid=%d)\n", cmd.Process.Pid)
 	return nil
 }

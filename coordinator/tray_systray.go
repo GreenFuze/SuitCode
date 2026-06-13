@@ -3,6 +3,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	_ "embed"
@@ -181,6 +182,7 @@ type projectSlot struct {
 	mCopyCall        *systray.MenuItem   // sub-item: "Copy Call Log"
 	mAnalyzeSession  *systray.MenuItem   // sub-item: "Analyze Last Session"
 	mCopyAnalysis    *systray.MenuItem   // sub-item: "Copy Analysis Pack"
+	mCopySessionZip  *systray.MenuItem   // sub-item: "Copy Session ZIP"
 	mCopyPackPath    *systray.MenuItem   // sub-item: "Copy Pack Path"
 	mOpenDir         *systray.MenuItem   // sub-item: "Open Project Folder"
 	mStop            *systray.MenuItem   // sub-item: "Stop Investigator"
@@ -233,6 +235,7 @@ func (m *trayMenu) build() {
 		mCopyCall       := mParent.AddSubMenuItem("Copy Call Log", "Copy the per-call detail log with seeds and limitation kinds to the clipboard")
 		mAnalyzeSession := mParent.AddSubMenuItem("Analyze Last Session", "Parse the most recent Claude Code session and compute heuristic quality signals")
 		mCopyAnalysis   := mParent.AddSubMenuItem("Copy Analysis Pack", "Copy the session analysis pack to clipboard for LLM review (shows privacy notice)")
+		mCopySessionZip := mParent.AddSubMenuItem("Copy Session ZIP", "Create a ZIP of the analysis pack + full session JSONL and place it on the clipboard for sharing")
 		mCopyPackPath   := mParent.AddSubMenuItem("Copy Analysis Pack Path", "Copy the analysis pack file path to clipboard — for local agents that can read files directly")
 		mOpenDir        := mParent.AddSubMenuItem("Open Project Folder", "Open the project directory in the system file manager")
 		mStop           := mParent.AddSubMenuItem("Stop Investigator", "Terminate the investigator process for this project")
@@ -248,6 +251,7 @@ func (m *trayMenu) build() {
 			mCopyCall:       mCopyCall,
 			mAnalyzeSession: mAnalyzeSession,
 			mCopyAnalysis:   mCopyAnalysis,
+			mCopySessionZip: mCopySessionZip,
 			mCopyPackPath:   mCopyPackPath,
 			mOpenDir:        mOpenDir,
 			mStop:           mStop,
@@ -362,6 +366,12 @@ func (m *trayMenu) runSlotHandler(s *projectSlot) {
 				return
 			}
 			m.handleCopyAnalysisPack(s)
+
+		case _, ok := <-s.mCopySessionZip.ClickedCh:
+			if !ok {
+				return
+			}
+			m.handleCopySessionZip(s)
 
 		case _, ok := <-s.mCopyPackPath.ClickedCh:
 			if !ok {
@@ -644,6 +654,180 @@ func (m *trayMenu) handleCopyAnalysisPackPath(s *projectSlot) {
 
 	logf("tray: analysis pack path copied to clipboard: %s", path)
 	m.flashStatus("✓ Analysis pack path copied to clipboard", 3*time.Second)
+}
+
+// handleCopySessionZip creates a ZIP archive containing the latest analysis
+// pack and the full session JSONL file, then places the ZIP on the clipboard
+// as a file so the user can paste it directly into an email or Slack message.
+// A privacy disclaimer is shown first because the session JSONL contains the
+// complete conversation text, not just excerpts.
+func (m *trayMenu) handleCopySessionZip(s *projectSlot) {
+	s.mu.Lock()
+	info := s.projectInfo
+	s.mu.Unlock()
+
+	if info.ProjectPath == "" {
+		return
+	}
+
+	if !showSessionShareDisclaimer() {
+		logf("tray: copy session zip: cancelled by user")
+		return
+	}
+
+	packPath, err := sessionanalysis.FindLatestAnalysisPack(info.ProjectPath)
+	if err != nil || packPath == "" {
+		logf("tray: copy session zip: no analysis pack found — run 'Analyze Last Session' first")
+		m.flashStatus("✗ No analysis pack — run Analyze Last Session first", 4*time.Second)
+		return
+	}
+
+	// Parse the pack to retrieve the session JSONL path.
+	packData, err := os.ReadFile(packPath)
+	if err != nil {
+		logf("tray: copy session zip: read pack: %v", err)
+		m.flashStatus("✗ Error reading analysis pack", 3*time.Second)
+		return
+	}
+
+	var pack sessionanalysis.AnalysisPack
+	if err := json.Unmarshal(packData, &pack); err != nil {
+		logf("tray: copy session zip: parse pack: %v", err)
+		m.flashStatus("✗ Error parsing analysis pack", 3*time.Second)
+		return
+	}
+
+	// Derive zip name from analysis pack timestamp so they are easily paired.
+	ts := strings.TrimPrefix(filepath.Base(packPath), "analysis-")
+	ts = strings.TrimSuffix(ts, ".json")
+	zipPath := filepath.Join(filepath.Dir(packPath), "session-share-"+ts+".zip")
+
+	if err := createSessionZip(zipPath, packPath, pack.SessionFile); err != nil {
+		logf("tray: copy session zip: create zip: %v", err)
+		m.flashStatus("✗ Error creating ZIP — see log", 3*time.Second)
+		return
+	}
+
+	if err := copyFileToClipboard(zipPath); err != nil {
+		logf("tray: copy session zip: clipboard: %v", err)
+		m.flashStatus("✗ ZIP saved to .suitcode/ — clipboard failed", 4*time.Second)
+		return
+	}
+
+	logf("tray: session ZIP created and copied to clipboard: %s", zipPath)
+	m.flashStatus("✓ Session ZIP on clipboard — paste to share", 4*time.Second)
+}
+
+// createSessionZip writes a ZIP archive at dest containing the analysis pack
+// JSON and the full session JSONL. A missing session file is logged but does
+// not cause an error — the pack alone is still useful.
+func createSessionZip(dest, packPath, sessionPath string) error {
+	f, err := os.Create(dest)
+	if err != nil {
+		return fmt.Errorf("create zip: %w", err)
+	}
+	defer f.Close()
+
+	zw := zip.NewWriter(f)
+	defer zw.Close()
+
+	addFile := func(src, name string) error {
+		data, readErr := os.ReadFile(src)
+		if readErr != nil {
+			return fmt.Errorf("read %s: %w", name, readErr)
+		}
+		w, zipErr := zw.Create(name)
+		if zipErr != nil {
+			return fmt.Errorf("zip entry %s: %w", name, zipErr)
+		}
+		_, writeErr := w.Write(data)
+		return writeErr
+	}
+
+	if err := addFile(packPath, filepath.Base(packPath)); err != nil {
+		return err
+	}
+
+	if sessionPath != "" {
+		if err := addFile(sessionPath, filepath.Base(sessionPath)); err != nil {
+			logf("tray: session zip: session file unavailable (%v) — zip contains analysis pack only", err)
+		}
+	}
+
+	return nil
+}
+
+// copyFileToClipboard places the file at path on the system clipboard as a
+// file object (not plain text) so the user can paste it into Explorer, email
+// clients, or Slack. On platforms where this is unsupported it falls back to
+// copying the path as text.
+func copyFileToClipboard(path string) error {
+	switch runtime.GOOS {
+	case "windows":
+		// Set-Clipboard -LiteralPath puts the file on the clipboard as a
+		// FileDropList — the user can paste it directly into Outlook or Slack.
+		escaped := strings.ReplaceAll(path, "'", "''")
+		script := fmt.Sprintf("Set-Clipboard -LiteralPath '%s'", escaped)
+		cmd := exec.Command("powershell", "-NonInteractive", "-Command", script)
+		if err := cmd.Run(); err != nil {
+			return copyToClipboard(path)
+		}
+		return nil
+	default:
+		// xclip supports text/uri-list which tells file managers this is a file.
+		if _, err := exec.LookPath("xclip"); err == nil {
+			uri := "file://" + path + "\n"
+			cmd := exec.Command("xclip", "-selection", "clipboard", "-t", "text/uri-list")
+			cmd.Stdin = strings.NewReader(uri)
+			if err := cmd.Run(); err == nil {
+				return nil
+			}
+		}
+		return copyToClipboard(path)
+	}
+}
+
+// showSessionShareDisclaimer presents a modal OK/Cancel dialog warning that
+// the session ZIP contains the FULL conversation, not just excerpts.
+// Returns true when the user confirms (or on non-Windows platforms where no
+// dialog is shown).
+func showSessionShareDisclaimer() bool {
+	if runtime.GOOS != "windows" {
+		return true
+	}
+
+	const script = `Add-Type -AssemblyName System.Windows.Forms
+$msg = @"
+PRIVACY NOTICE
+
+The session ZIP contains your FULL Claude Code conversation —
+all messages, code, and tool output — not just excerpts.
+
+Only share with trusted parties.
+"@
+$r = [System.Windows.Forms.MessageBox]::Show(
+    $msg,
+    'SuitCode - Session Share',
+    [System.Windows.Forms.MessageBoxButtons]::OKCancel,
+    [System.Windows.Forms.MessageBoxIcon]::Warning
+)
+if ($r -eq [System.Windows.Forms.DialogResult]::OK) { exit 0 } else { exit 1 }
+`
+
+	f, err := os.CreateTemp("", "suitcode-sessdisclaimer-*.ps1")
+	if err != nil {
+		return true
+	}
+	defer os.Remove(f.Name())
+
+	if _, err := f.WriteString(script); err != nil {
+		f.Close()
+		return true
+	}
+	f.Close()
+
+	cmd := exec.Command("powershell", "-NonInteractive", "-File", f.Name())
+	return cmd.Run() == nil
 }
 
 // showPrivacyDisclaimer presents a modal OK/Cancel dialog explaining that the

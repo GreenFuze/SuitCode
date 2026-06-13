@@ -36,15 +36,25 @@ fi
 echo "Building and installing from local source..."
 echo ""
 
+SOURCE_DIR="$(pwd)"
+# On Windows (Git Bash / MSYS2), pwd returns /c/path/... which Go cannot
+# resolve. Convert to the native Windows path (C:\path\...) via cygpath.
+if echo "$OS" | grep -qi "mingw\|msys\|cygwin\|windows"; then
+  if command -v cygpath >/dev/null 2>&1; then
+    SOURCE_DIR="$(cygpath -w "$(pwd)")"
+  fi
+fi
+
 if [ "$CI" -eq 1 ]; then
   echo "  [headless mode: no tray icon]"
-  CGO_ENABLED=0 go install ./suitcode/
+  CGO_ENABLED=0 go install -ldflags "-X main.sourceDir=${SOURCE_DIR}" ./suitcode/
   CGO_ENABLED=0 go install ./coordinator/
   CGO_ENABLED=0 go install ./investigator/
 else
-  # suitcode — plain console binary.
-  echo "  go install ./suitcode/"
-  go install ./suitcode/
+  # suitcode — plain console binary. Embed the source directory so
+  # "suitcode update" knows where to rebuild from.
+  echo "  go install -ldflags \"-X main.sourceDir=${SOURCE_DIR}\" ./suitcode/"
+  go install -ldflags "-X main.sourceDir=${SOURCE_DIR}" ./suitcode/
 
   # coordinator — must include the systray tag.
   # On Windows also needs -H windowsgui to suppress the console window.
